@@ -1,0 +1,51 @@
+# OS
+.DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+.trae/
+*.swp
+*.swo
+
+# Environment Variables
+.env
+.env.*
+!.env.example
+
+# Data (Docker volumes)
+data/
+mysql_data/
+redis_data/
+rabbitmq_data/
+
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+backend/venv/
+backend/.venv/
+*.egg-info/
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Node / Frontend
+node_modules/
+dist/
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+
+# Logs
+*.log
+logs/
