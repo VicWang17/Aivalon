@@ -17,7 +17,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../"))
 
 # 3. 导入 SQLAlchemy Base (这里需要导入所有定义了 Model 的文件，目前只有 Base)
 from app.db.base import Base
-# from app.models.user import User  # 后续定义了 User 模型后需要在这里导入
+from app.models.user import User  # 导入 User 模型以便 Alembic 识别
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
