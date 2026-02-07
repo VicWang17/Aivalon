@@ -3,7 +3,7 @@
 """
 from typing import List, Optional
 from pydantic import BaseModel
-from app.models.game_enums import GamePhase, Character, VoteOption, MissionResult
+from app.models.game_enums import GamePhase, Character, VoteOption, MissionResult, ActionType
 
 class PlayerState(BaseModel):
     """玩家在单局游戏中的状态"""
@@ -13,6 +13,10 @@ class PlayerState(BaseModel):
     character: Optional[Character] = None # 角色（对本人可见，或结算后公开）
     is_alive: bool = True   # 是否存活（刺杀阶段用）
     
+    # 视角相关标记 (用于前端展示)
+    is_seen_as_evil: bool = False # 在观察者视角中是否显示为坏人（如梅林看坏人）
+    is_seen_as_merlin: bool = False # 在观察者视角中是否显示为梅林候选（如派西维尔看梅林/莫甘娜）
+
     # 临时状态标记
     has_voted: bool = False
     has_acted: bool = False # 是否已执行任务/刺杀
@@ -42,7 +46,28 @@ class GameState(BaseModel):
     
     # 历史记录
     mission_results: List[MissionResult] = [] # 每一轮任务的结果
+    pending_mission_results: List[MissionResult] = [] # 当前轮次待结算的任务结果（临时存储）
     winner: Optional[str] = None         # 胜利阵营 (good/evil)
 
     class Config:
         from_attributes = True
+
+class GameCreateRequest(BaseModel):
+    player_ids: List[int]
+
+class GameCreateResponse(BaseModel):
+    game_id: str
+    initial_state: GameState
+
+class GameActionRequest(BaseModel):
+    """
+    统一动作请求
+    """
+    action_type: ActionType
+    # 负载数据，根据 action_type 不同而不同
+    # PROPOSE: {"target_ids": [1, 2]}
+    # VOTE: {"option": "approve"}
+    # MISSION: {"result": "success"}
+    # ASSASSINATE: {"target_id": 3}
+    # SPEAK: {} (暂时为空，或包含语音/文本内容)
+    payload: dict = {}
