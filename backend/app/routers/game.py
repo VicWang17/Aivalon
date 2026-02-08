@@ -41,7 +41,7 @@ async def create_game(
         user_map[uid] = f"User_{uid}"
 
     # 5. 调用 Service 创建对局
-    game_state = await GameService.create_game(request.player_ids, user_map)
+    game_state = await GameService.create_game(request.player_ids, user_map, creator_id=current_user.id)
     
     return GameCreateResponse(
         game_id=game_state.game_id,

@@ -30,22 +30,32 @@ service.interceptors.request.use(
 // response 拦截器
 service.interceptors.response.use(
   response => {
+    // 兼容 FastAPI 直接返回数据的情况（非统一 Response 结构）
+    // 如果返回的不是 { code, message, data } 结构，直接返回 data
     const res = response.data
-    // 这里可以根据后端的 code 做统一判断
-    // 假设 code === 0 为成功
-    if (res.code !== 0) {
-      console.error('API Error:', res.message)
-      // 可以结合 UI 组件库弹出错误提示
-      return Promise.reject(new Error(res.message || 'Error'))
-    } else {
+    
+    // 检查是否存在业务 code
+    if (res && typeof res.code === 'number') {
+      if (res.code !== 0) {
+        console.error('API Error:', res.message)
+        return Promise.reject(new Error(res.message || 'Error'))
+      }
       return res
     }
+    
+    // 如果没有 code 字段，说明是直接返回的数据（如 Pydantic Model），直接返回 response
+    return response
   },
   error => {
     console.error('Request Error:', error)
     // 可以在这里处理 401 (未授权) 跳转登录页等逻辑
     if (error.response && error.response.status === 401) {
-       // TODO: 清除 Token 并跳转登录页
+      // 避免循环引用，这里直接操作 localStorage 和 window.location
+      localStorage.removeItem('aivalon_token')
+      // 如果当前不在登录页，则跳转
+      if (!window.location.pathname.includes('/login')) {
+        window.location.href = '/login'
+      }
     }
     return Promise.reject(error)
   }

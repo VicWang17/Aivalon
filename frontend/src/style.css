@@ -1,79 +1,168 @@
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Inter:wght@400;500;600&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap');
+
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
+  /* 2.1 Base Colors */
+  --color-bg-main: #0f1016; /* 深邃夜空黑 */
+  --color-bg-card: #1a1b26; /* 深色底板 */
+  --color-bg-card-overlay: rgba(20, 20, 30, 0.85); /* 半透明磨砂 */
+  
+  --color-text-primary: #e2e8f0; /* 月光银白 */
+  --color-text-secondary: #94a3b8; /* 秘银灰 */
+  --color-text-accent: #fbbf24; /* 古金 */
+  
+  --color-border: #475569; /* 普通边框 */
+  --color-border-highlight: #b45309; /* 暗金边框 */
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  /* 2.2 Brand & Functional Colors */
+  --color-primary: #7c3aed; /* 秘法紫 */
+  --color-primary-dark: #6d28d9;
+  --color-highlight: #f59e0b; /* 琥珀金 */
+  --color-success: #0ea5e9; /* 圣光蓝 */
+  --color-danger: #dc2626; /* 鲜血红 */
+  --color-warning: #d97706; /* 深橙 */
 
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
+  /* 2.3 Faction Colors */
+  --color-good: #38bdf8;
+  --color-evil: #ef4444;
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
+  /* Fonts */
+  --font-heading: 'Cinzel', 'Playfair Display', serif;
+  --font-body: 'Inter', system-ui, sans-serif;
 }
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
   min-height: 100vh;
+  background-color: var(--color-bg-main);
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Optional: Background Texture */
+  /* background-image: url('/path/to/texture.png'); */
+  background-blend-mode: overlay;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  color: var(--color-text-primary);
+  margin-top: 0;
 }
 
 h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
+  font-size: 2.5rem;
+  background: linear-gradient(to right, #fcd34d, #fbbf24, #d97706);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent; /* Fallback */
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+a {
+  color: var(--color-primary);
+  text-decoration: none;
+  transition: color 0.3s;
+}
+
+a:hover {
+  color: var(--color-highlight);
 }
 
 button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
   cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+  font-family: var(--font-body);
+  transition: all 0.3s ease;
 }
 
-.card {
-  padding: 2em;
+/* Glassmorphism Utility */
+.glass-panel {
+  background: var(--color-bg-card-overlay);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
 }
 
-#app {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+.glass-panel:hover {
+  border-color: var(--color-text-accent);
+  box-shadow: 0 0 15px rgba(124, 58, 237, 0.2);
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
+/* Form Elements */
+input {
+  background: rgba(15, 16, 22, 0.6);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  font-family: var(--font-body);
+  width: 100%;
+  box-sizing: border-box;
+  transition: border-color 0.3s, box-shadow 0.3s;
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2);
+}
+
+/* Button Styles */
+.btn-primary {
+  background: linear-gradient(135deg, var(--color-primary-dark), var(--color-primary));
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  border-radius: 6px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+.btn-primary:hover {
+  box-shadow: 0 0 15px rgba(124, 58, 237, 0.6);
+  transform: translateY(-1px);
+}
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--color-text-accent);
+}
+
+.btn-ghost:hover {
+  border-color: var(--color-text-accent);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.text-accent {
+  color: var(--color-text-accent);
+}
+
+.text-secondary {
+  color: var(--color-text-secondary);
+}
+
+.text-danger {
+  color: var(--color-danger);
+}
+
+.flex-center {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.w-full {
+  width: 100%;
+}
+
+.mt-4 {
+  margin-top: 1rem;
+}
+
+.mb-4 {
+  margin-bottom: 1rem;
 }

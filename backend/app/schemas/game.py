@@ -10,6 +10,7 @@ class PlayerState(BaseModel):
     user_id: int
     username: str
     seat_id: int            # 座位号 0-7
+    is_ai: bool = False     # 是否为 AI 玩家
     character: Optional[Character] = None # 角色（对本人可见，或结算后公开）
     is_alive: bool = True   # 是否存活（刺杀阶段用）
     
@@ -20,6 +21,12 @@ class PlayerState(BaseModel):
     # 临时状态标记
     has_voted: bool = False
     has_acted: bool = False # 是否已执行任务/刺杀
+
+class ChatMessage(BaseModel):
+    user_id: int
+    username: str
+    content: str
+    timestamp: float = 0.0
 
 class GameState(BaseModel):
     """
@@ -36,6 +43,7 @@ class GameState(BaseModel):
     # 当前焦点
     leader_id: Optional[int] = None      # 当前队长 user_id
     speaker_id: Optional[int] = None     # 当前发言玩家 user_id (SPEECH阶段)
+    speech_history: List[ChatMessage] = [] # 发言历史记录
     
     # 队伍与投票
     proposed_team: List[int] = []        # 当前提名的队伍成员 user_id 列表

@@ -16,6 +16,10 @@ class TimeoutPolicy:
     @staticmethod
     def is_timed_out(game: GameState, current_time: float = None) -> bool:
         """判断当前阶段是否已超时"""
+        # 发言阶段无超时限制（由玩家/AI自行结束）
+        if game.phase == GamePhase.SPEECH:
+            return False
+
         if current_time is None:
             current_time = time.time()
         # 如果 phase_start_time 未设置（0.0），则不认为超时（避免刚初始化时的边界情况）

@@ -7,7 +7,7 @@ import uuid
 import random
 import time
 from fastapi import HTTPException, status
-from app.schemas.game import GameState, PlayerState
+from app.schemas.game import GameState, PlayerState, ChatMessage
 from app.models.game_enums import GamePhase, Character, Camp, ActionType, VoteOption, MissionResult
 
 # 内存存储，用于临时保存对局状态
@@ -22,11 +22,12 @@ EVIL_VISIBLE_CHARACTERS = EVIL_CHARACTERS
 
 class GameService:
     @staticmethod
-    async def create_game(player_ids: List[int], user_map: Dict[int, str]) -> GameState:
+    async def create_game(player_ids: List[int], user_map: Dict[int, str], creator_id: Optional[int] = None) -> GameState:
         """
         创建一个新的对局
         :param player_ids: 玩家ID列表
         :param user_map: 用户ID到用户名的映射
+        :param creator_id: 创建者ID (用于标记真实玩家)
         :return: 初始化的游戏状态
         """
         # 1. 生成 Game ID
@@ -38,10 +39,17 @@ class GameService:
         
         players: List[PlayerState] = []
         for seat_id, uid in enumerate(shuffled_ids):
+            # 只有创建者是真人，其余默认为 AI
+            # (后续可扩展为支持多真人)
+            is_ai_player = True
+            if creator_id is not None and uid == creator_id:
+                is_ai_player = False
+                
             players.append(PlayerState(
                 user_id=uid,
                 username=user_map.get(uid, f"User_{uid}"),
-                seat_id=seat_id
+                seat_id=seat_id,
+                is_ai=is_ai_player
             ))
             
         # 3. 分配角色
@@ -83,6 +91,10 @@ class GameService:
         
         # 5. 保存到内存
         games[game_id] = initial_state
+        
+        # TODO: 初始阶段如果是 AI 队长发言，需要触发 AI
+        # if initial_state.speaker_id is AI:
+        #    trigger_ai()
         
         return initial_state
 
@@ -226,6 +238,9 @@ class GameService:
                         game.phase = GamePhase.SPEECH
                         game.speaker_id = game.leader_id
                         game.proposed_team = []
+                        # 重置发言状态
+                        for p in game.players:
+                            p.has_acted = False
                 
                 game.phase_start_time = time.time()
 
@@ -292,6 +307,9 @@ class GameService:
                     
                     game.phase = GamePhase.SPEECH
                     game.speaker_id = game.leader_id
+                    # 重置发言状态
+                    for p in game.players:
+                        p.has_acted = False
                 
                 game.phase_start_time = time.time()
 
@@ -310,25 +328,57 @@ class GameService:
 
         # --- SPEAK (发言) ---
         elif action_type == ActionType.SPEAK:
-            # 简单校验：只有当前发言者能结束发言
+            content = payload.get("content")
+            is_end = payload.get("is_end", False)
+            
+            # 校验权限
             if game.speaker_id != user_id:
                  raise HTTPException(status_code=403, detail="Not your turn to speak")
 
-            # 找到当前发言者索引
-            current_speaker_idx = next(i for i, p in enumerate(game.players) if p.user_id == user_id)
-            next_speaker_idx = (current_speaker_idx + 1) % len(game.players)
-            next_player = game.players[next_speaker_idx]
+            # 1. 记录发言
+            if content:
+                msg = ChatMessage(
+                    user_id=user_id,
+                    username=player.username,
+                    content=content,
+                    timestamp=time.time()
+                )
+                game.speech_history.append(msg)
 
-            # 检查是否回到队长（转了一圈）
-            # 注意：leader_id 是本轮的队长
-            if next_player.user_id == game.leader_id:
-                # 发言结束，进入提名阶段
-                game.phase = GamePhase.TEAM_PROPOSAL
-                game.speaker_id = None
-            else:
-                # 轮到下一个人发言
-                game.speaker_id = next_player.user_id
-            
-            game.phase_start_time = time.time()
+            # 2. 处理结束发言
+            if is_end:
+                player.has_acted = True # 标记已完成发言
+                
+                # 寻找下一个未发言的玩家
+                next_speaker_id = None
+                current_seat = player.seat_id
+                num_players = len(game.players)
+                
+                # 从下一位开始找
+                for i in range(1, num_players + 1):
+                    idx = (current_seat + i) % num_players
+                    p = game.players[idx]
+                    if not p.has_acted:
+                        next_speaker_id = p.user_id
+                        break
+                
+                if next_speaker_id:
+                    game.speaker_id = next_speaker_id
+                    
+                    # TODO: 检测 next_speaker_id 是否为 AI
+                    # 如果是 AI，则在此处触发 LLM 生成任务（异步）
+                    # next_player = next(p for p in game.players if p.user_id == next_speaker_id)
+                    # if next_player.is_ai:
+                    #     background_tasks.add_task(ai_service.generate_speech, game_id, next_speaker_id)
+                    
+                else:
+                    # 所有人都发言完毕，进入提名阶段
+                    game.phase = GamePhase.TEAM_PROPOSAL
+                    game.speaker_id = None
+                    # 重置 acted 状态
+                    for p in game.players:
+                        p.has_acted = False
+                
+                game.phase_start_time = time.time()
 
         return game

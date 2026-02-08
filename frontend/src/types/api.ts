@@ -17,3 +17,131 @@ export const ErrorCode = {
 } as const;
 
 export type ErrorCodeType = typeof ErrorCode[keyof typeof ErrorCode];
+
+// 登录参数
+export interface LoginData {
+  username: string;
+  password: string;
+}
+
+// 登录响应
+export interface LoginResponse {
+  access_token: string;
+  token_type: string;
+}
+
+// 注册参数
+export interface RegisterData {
+  username: string;
+  email: string;
+  password: string;
+  verification_code: string;
+}
+
+// 发送验证码参数
+export interface SendCodeData {
+  email: string;
+}
+
+// 用户信息
+export interface UserInfo {
+  id: number;
+  username: string;
+  email: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+// 游戏相关类型定义
+export const GamePhase = {
+  LEADER_SELECTION: "LEADER_SELECTION",
+  SPEECH: "SPEECH",
+  TEAM_PROPOSAL: "TEAM_PROPOSAL",
+  VOTE: "VOTE",
+  MISSION: "MISSION",
+  ASSASSINATION: "ASSASSINATION",
+  FINISHED: "FINISHED"
+} as const;
+export type GamePhase = typeof GamePhase[keyof typeof GamePhase];
+
+export const Character = {
+  MERLIN: "Merlin",
+  PERCIVAL: "Percival",
+  SERVANT: "Loyal Servant of Arthur",
+  MORGANA: "Morgana",
+  ASSASSIN: "Assassin",
+  MINION: "Minion of Mordred",
+  OBERON: "Oberon",
+  MORDRED: "Mordred"
+} as const;
+export type Character = typeof Character[keyof typeof Character];
+
+export const VoteOption = {
+  APPROVE: "approve",
+  REJECT: "reject"
+} as const;
+export type VoteOption = typeof VoteOption[keyof typeof VoteOption];
+
+export const MissionResult = {
+  SUCCESS: "success",
+  FAIL: "fail"
+} as const;
+export type MissionResult = typeof MissionResult[keyof typeof MissionResult];
+
+export const ActionType = {
+  PROPOSE: "PROPOSE",
+  VOTE: "VOTE",
+  MISSION: "MISSION",
+  ASSASSINATE: "ASSASSINATE",
+  SPEAK: "SPEAK"
+} as const;
+export type ActionType = typeof ActionType[keyof typeof ActionType];
+
+export interface PlayerState {
+  user_id: number;
+  username: string;
+  seat_id: number;
+  character?: Character;
+  is_alive: boolean;
+  is_seen_as_evil: boolean;
+  is_seen_as_merlin: boolean;
+  has_voted: boolean;
+  has_acted: boolean;
+}
+
+export interface ChatMessage {
+  user_id: number;
+  username: string;
+  content: string;
+  timestamp: number;
+}
+
+export interface GameState {
+  game_id: string;
+  phase: GamePhase;
+  phase_start_time: number;
+  round: number;
+  vote_track: number;
+  leader_id?: number;
+  speaker_id?: number;
+  speech_history: ChatMessage[];
+  proposed_team: number[];
+  votes: Record<number, VoteOption>;
+  players: PlayerState[];
+  mission_results: MissionResult[];
+  winner?: string;
+}
+
+export interface CreateGameRequest {
+  player_ids: number[];
+}
+
+export interface CreateGameResponse {
+  game_id: string;
+  initial_state: GameState;
+}
+
+export interface GameActionRequest {
+  action_type: ActionType;
+  payload: Record<string, any>;
+}
