@@ -161,6 +161,8 @@ import { getGameState, submitAction } from '../api/game'
 import { useUserStore } from '../store/user'
 import type { GameState, PlayerState } from '../types/api'
 import { GamePhase, Character, MissionResult } from '../types/api'
+import { GameSocket } from '../utils/socket'
+import { WebSocketOpCode } from '../types/protocol'
 
 const route = useRoute()
 const router = useRouter()
@@ -170,6 +172,7 @@ const gameId = route.params.gameId as string
 const gameState = ref<GameState | null>(null)
 const speechInput = ref('')
 const chatHistoryRef = ref<HTMLElement | null>(null)
+let socket: GameSocket | null = null
 
 // 计算属性
 const players = computed(() => gameState.value?.players || [])
@@ -298,11 +301,23 @@ const getMissionClass = (index: number) => {
 // 生命周期
 onMounted(() => {
   fetchGameState()
-  // 轮询或WebSocket尚未实现，暂手动刷新
+  
+  if (gameId) {
+    socket = new GameSocket(gameId)
+    socket.onMessage((msg) => {
+      // 简单处理：收到状态更新或快照时，刷新页面状态
+      if (msg.type === WebSocketOpCode.STATE_UPDATE || msg.type === WebSocketOpCode.GAME_SNAPSHOT) {
+        fetchGameState()
+      }
+    })
+    socket.connect()
+  }
 })
 
 onUnmounted(() => {
-  // 清理工作
+  if (socket) {
+    socket.disconnect()
+  }
 })
 </script>
 

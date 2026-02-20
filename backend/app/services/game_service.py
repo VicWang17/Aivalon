@@ -20,6 +20,9 @@ EVIL_CHARACTERS = {Character.ASSASSIN, Character.MORGANA, Character.MINION}
 # 在 MVP 8人局中，没有奥伯伦，所有坏人互见
 EVIL_VISIBLE_CHARACTERS = EVIL_CHARACTERS
 
+from app.core.socket_manager import manager
+from app.schemas.protocol import WSMessage, WebSocketOpCode
+
 class GameService:
     @staticmethod
     async def create_game(player_ids: List[int], user_map: Dict[int, str], creator_id: Optional[int] = None) -> GameState:
@@ -380,5 +383,18 @@ class GameService:
                         p.has_acted = False
                 
                 game.phase_start_time = time.time()
+
+        # 3. 广播状态更新事件
+        # 前端收到此消息后，应立即调用 GET /games/{game_id} 拉取最新状态
+        # 这种方式避免了在 WebSocket 层处理复杂的视角脱敏逻辑
+        try:
+            update_msg = WSMessage(
+                type=WebSocketOpCode.STATE_UPDATE,
+                payload={"game_id": game_id}
+            )
+            await manager.broadcast(game_id, update_msg)
+        except Exception as e:
+            # 广播失败不应影响主流程
+            print(f"Broadcast failed: {e}")
 
         return game

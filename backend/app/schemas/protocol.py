@@ -18,7 +18,7 @@ class WebSocketOpCode(str, Enum):
     ERROR = "error"                 # 错误通知
     PONG = "pong"                   # 心跳响应
 
-class WSMesssage(BaseModel):
+class WSMessage(BaseModel):
     """
     WebSocket 消息信封
     所有的 WS 通信都应该遵循此格式
