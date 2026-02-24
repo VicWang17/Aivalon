@@ -18,8 +18,8 @@
       </div>
 
       <div class="header-right">
-        <button class="btn-ghost btn-sm" @click="handleRefresh">
-          <span class="icon">🔄</span>
+        <button class="btn-ghost btn-sm" @click="router.push('/')" title="返回主页">
+          <span class="icon">🏠</span>
         </button>
       </div>
     </header>
@@ -78,7 +78,7 @@
         <div class="chat-header">
           <h3>会议记录</h3>
         </div>
-        <div class="chat-history">
+        <div class="chat-history" ref="chatHistoryRef">
           <div v-if="gameState?.speech_history?.length === 0" class="empty-tip">暂无发言</div>
           <div 
             v-for="(msg, idx) in gameState?.speech_history" 
@@ -93,7 +93,9 @@
               <span class="msg-user">{{ msg.username }}</span>
               <!-- <span class="msg-time">{{ formatTime(msg.timestamp) }}</span> -->
             </div>
-            <div class="msg-content">{{ msg.content }}</div>
+            <div class="msg-content">
+              <span>{{ msg.content }}</span>
+            </div>
           </div>
         </div>
         
@@ -131,7 +133,7 @@
           class="mission-node"
           :class="getMissionClass(i)"
         >
-          <span class="mission-num">{{ i }}</span>
+          <span class="mission-num">{{ getMissionSize(i) }}</span>
         </div>
       </div>
 
@@ -198,7 +200,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, onUnmounted, watch } from 'vue'
+import { ref, onMounted, computed, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getGameState, submitAction } from '../api/game'
 import { useUserStore } from '../store/user'
@@ -215,29 +217,56 @@ const gameId = route.params.gameId as string
 const gameState = ref<GameState | null>(null)
 const speechInput = ref('')
 const selectedPlayerIds = ref<number[]>([])
-// const chatHistoryRef = ref<HTMLElement | null>(null)
+const chatHistoryRef = ref<HTMLElement | null>(null)
 let socket: GameSocket | null = null
+
+// 监听 speech_history 变化
+watch(() => gameState.value?.speech_history, (newVal, oldVal) => {
+  if (!newVal) return
+  
+  // 找出新增的消息
+  const oldLen = oldVal ? oldVal.length : 0
+  if (newVal.length > oldLen) {
+    // 滚动到底部
+    nextTick(() => {
+      scrollToBottom()
+    })
+  }
+}, { deep: true })
+
+const scrollToBottom = () => {
+  if (chatHistoryRef.value) {
+    chatHistoryRef.value.scrollTop = chatHistoryRef.value.scrollHeight
+  }
+}
+
 
 // 计算属性
 const players = computed(() => gameState.value?.players || [])
+
+// Basic lookup table for standard Avalon
+const MISSION_CONFIG: Record<number, Record<number, number>> = {
+  5: { 1: 2, 2: 3, 3: 2, 4: 3, 5: 3 },
+  6: { 1: 2, 2: 3, 3: 4, 4: 3, 5: 4 },
+  7: { 1: 2, 2: 3, 3: 3, 4: 4, 5: 4 },
+  8: { 1: 3, 2: 4, 3: 4, 4: 5, 5: 5 },
+  9: { 1: 3, 2: 4, 3: 4, 4: 5, 5: 5 },
+  10: { 1: 3, 2: 4, 3: 4, 4: 5, 5: 5 },
+}
 
 const requiredTeamSize = computed(() => {
   if (!gameState.value) return 0
   const playerCount = gameState.value.players.length
   const round = gameState.value.round
   
-  // Basic lookup table for standard Avalon
-  const missionConfig: Record<number, Record<number, number>> = {
-    5: { 1: 2, 2: 3, 3: 2, 4: 3, 5: 3 },
-    6: { 1: 2, 2: 3, 3: 4, 4: 3, 5: 4 },
-    7: { 1: 2, 2: 3, 3: 3, 4: 4, 5: 4 },
-    8: { 1: 3, 2: 4, 3: 4, 4: 5, 5: 5 },
-    9: { 1: 3, 2: 4, 3: 4, 4: 5, 5: 5 },
-    10: { 1: 3, 2: 4, 3: 4, 4: 5, 5: 5 },
-  }
-  
-  return missionConfig[playerCount]?.[round] || 0
+  return MISSION_CONFIG[playerCount]?.[round] || 0
 })
+
+const getMissionSize = (round: number) => {
+  if (!gameState.value) return round
+  const playerCount = gameState.value.players.length
+  return MISSION_CONFIG[playerCount]?.[round] || round
+}
 
 const voteResultMap = computed(() => {
   if (!gameState.value?.votes) return {}
@@ -333,10 +362,6 @@ const handleAction = async (type: string, payload: any = {}) => {
     const msg = (error as any).response?.data?.detail || (error as any).message || '未知错误'
     alert('操作失败: ' + msg)
   }
-}
-
-const handleRefresh = async () => {
-  await fetchGameState()
 }
 
 const toggleSelection = (userId: number) => {

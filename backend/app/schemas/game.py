@@ -1,7 +1,7 @@
 """
 这个文件定义了对局状态的核心数据模型（Schema），用于状态机流转与前端通信。
 """
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from app.models.game_enums import GamePhase, Character, VoteOption, MissionResult, ActionType
 
@@ -21,6 +21,9 @@ class PlayerState(BaseModel):
     # 临时状态标记
     has_voted: bool = False
     has_acted: bool = False # 是否已执行任务/刺杀
+    
+    # AI 记忆字段 (仅服务端可见，用于 LLM 上下文保持)
+    ai_memory: str = ""
 
 class ChatMessage(BaseModel):
     user_id: int
@@ -53,7 +56,9 @@ class GameState(BaseModel):
     players: List[PlayerState]
     
     # 历史记录
-    mission_results: List[MissionResult] = [] # 每一轮任务的结果
+    mission_results: List[MissionResult] = [] # 每一轮任务的结果 (简略版)
+    mission_history: List[Dict[str, Any]] = [] # 详细任务历史 (Round, Team, Result, FailCount)
+    vote_history: List[Dict[str, Any]] = [] # 投票历史记录 (Round, Leader, Team, Votes, Result)
     pending_mission_results: List[MissionResult] = [] # 当前轮次待结算的任务结果（临时存储）
     winner: Optional[str] = None         # 胜利阵营 (good/evil)
 

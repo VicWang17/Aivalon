@@ -28,6 +28,7 @@ EVIL_VISIBLE_CHARACTERS = EVIL_CHARACTERS
 
 from app.core.socket_manager import manager
 from app.schemas.protocol import WSMessage, WebSocketOpCode
+from app.services.ai_service import AIService
 
 class GameService:
     @staticmethod
@@ -183,6 +184,9 @@ class GameService:
         finally:
             db.close()
 
+
+
+
         # 触发 AI 逻辑 (异步)
         asyncio.create_task(GameService._trigger_ai_logic(game_id))
         
@@ -260,6 +264,9 @@ class GameService:
             should_hide_character = True
             p_copy.is_seen_as_evil = False
             p_copy.is_seen_as_merlin = False
+            
+            # 隐藏 AI 记忆 (前端无需展示)
+            p_copy.ai_memory = ""
 
             # 1. 游戏结束或自己看自己 -> 显示
             if game.phase == GamePhase.FINISHED or p.user_id == viewer_id:
@@ -347,6 +354,17 @@ class GameService:
                     "rejected": len(game.players) - approve_count,
                     "details": game.votes.copy() # 公开每个人投了什么
                 }
+
+                # --- 记录到 GameState.vote_history ---
+                game.vote_history.append({
+                    "round": game.round,
+                    "vote_track": game.vote_track,
+                    "leader_id": game.leader_id,
+                    "team": game.proposed_team.copy(),
+                    "votes": game.votes.copy(),
+                    "result": "approve" if approve_count > len(game.players) / 2 else "reject"
+                })
+                # -------------------------------------
 
                 # --- 新增：将投票结果写入会议记录 ---
                 vote_details_str = []
@@ -437,6 +455,15 @@ class GameService:
                 final_result = MissionResult.FAIL if is_failed else MissionResult.SUCCESS
                 game.mission_results.append(final_result)
                 
+                # --- 新增：记录详细任务历史 ---
+                game.mission_history.append({
+                    "round": game.round,
+                    "team": game.proposed_team.copy(),
+                    "result": final_result,
+                    "fail_count": fail_count
+                })
+                # ---------------------------
+
                 # 触发一个额外的事件：任务结果揭晓
                 # 这个事件不由玩家触发，而是系统触发
                 # 我们稍后在写入数据库时处理
@@ -494,11 +521,26 @@ class GameService:
             target_id = payload.get("target_id")
             target = next((p for p in game.players if p.user_id == target_id), None)
             
+            # 记录刺杀结果
+            assassin_name = player.username
+            target_name = target.username if target else "Unknown"
+            result_msg = ""
+
             if target and target.character == Character.MERLIN:
                 game.winner = Camp.EVIL
+                result_msg = f"刺客 {assassin_name} 刺杀了 {target_name} (梅林)！坏人胜利！"
             else:
                 game.winner = Camp.GOOD
-                
+                target_char = target.character.value if target else "Unknown"
+                result_msg = f"刺客 {assassin_name} 刺杀了 {target_name} ({target_char})。刺杀失败，好人胜利！"
+
+            game.speech_history.append(ChatMessage(
+                user_id=0,
+                username="系统",
+                content=result_msg,
+                timestamp=time.time()
+            ))
+
             game.phase = GamePhase.FINISHED
             game.phase_start_time = time.time()
 

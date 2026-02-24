@@ -1,6 +1,7 @@
 # 这个文件是项目的全局配置管理，使用 pydantic-settings 从环境变量或 .env 文件加载配置，确保类型安全。
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+import os
 
 class Settings(BaseSettings):
     # App
@@ -37,6 +38,14 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 600
 
-    model_config = SettingsConfigDict(env_file="../.env", extra="ignore")
+    # LLM (DeepSeek)
+    DEEPSEEK_API_KEY: Optional[str] = None
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+
+    model_config = SettingsConfigDict(
+        env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), ".env"),
+        extra="ignore"
+    )
 
 settings = Settings()
