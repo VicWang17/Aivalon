@@ -6,6 +6,7 @@ from typing import List, Dict, Optional
 import uuid
 import random
 import time
+import asyncio
 from fastapi import HTTPException, status
 from app.schemas.game import GameState, PlayerState, ChatMessage
 from app.models.game_enums import GamePhase, Character, Camp, ActionType, VoteOption, MissionResult
@@ -182,11 +183,52 @@ class GameService:
         finally:
             db.close()
 
-        # TODO: 初始阶段如果是 AI 队长发言，需要触发 AI
-        # if initial_state.speaker_id is AI:
-        #    trigger_ai()
+        # 触发 AI 逻辑 (异步)
+        asyncio.create_task(GameService._trigger_ai_logic(game_id))
         
         return initial_state
+
+    @staticmethod
+    async def _trigger_ai_logic(game_id: str):
+        """
+        触发 AI 逻辑：检查当前是否有 AI 需要行动，并执行
+        """
+        # 避免循环导入
+        from app.services.ai_service import AIService
+        
+        # 稍微延迟一下，模拟思考时间，也给前端反应时间
+        await asyncio.sleep(1.5)
+
+        game = games.get(game_id)
+        if not game or game.phase == GamePhase.FINISHED:
+            return
+
+        # 遍历玩家，找到第一个需要行动的 AI
+        # 注意：这里可能存在并发问题，但对于回合制游戏，串行执行通常是可以接受的
+        for player in game.players:
+            if not player.is_ai:
+                continue
+                
+            action = AIService.get_action(game, player)
+            if action:
+                try:
+                    print(f"[AI] Triggering action for {player.username} ({player.user_id}): {action['action_type']}")
+                    # 递归调用 process_action
+                    await GameService.process_action(
+                        game_id, 
+                        player.user_id, 
+                        action["action_type"], 
+                        action["payload"]
+                    )
+                    # 执行完一个动作后，状态可能改变，
+                    # process_action 会再次触发 _trigger_ai_logic
+                    # 所以这里直接返回，不再继续遍历，让下一个触发去处理下一个动作
+                    return
+                except Exception as e:
+                    print(f"[AI] Error executing action for {player.username}: {e}")
+                    # 如果出错，继续尝试下一个 AI（如果是并发场景）或者直接退出
+                    # 这里为了健壮性，选择继续下一个
+                    continue
 
     @staticmethod
     def get_game(game_id: str) -> Optional[GameState]:
@@ -493,35 +535,23 @@ class GameService:
                     game_record.status = "finished"
                     game_record.winner = game.winner
                     game_record.finished_at = func.now()
+                    db.add(game_record)
             
             db.commit()
         except Exception as e:
             print(f"Failed to persist action for game {game_id}: {e}")
             db.rollback()
-            # 即使持久化失败，内存状态已经更新，为了不卡死流程，暂不抛出异常
-            # 但生产环境应该有重试机制
+            # 即使持久化失败，内存状态可能已经更新，这会导致不一致
+            # 但这里为了用户体验，暂时忽略错误（或者应该回滚内存状态？）
         finally:
             db.close()
 
-        # 4. 广播状态更新事件
-        # 前端收到此消息后，应立即调用 GET /games/{game_id} 拉取最新状态
-        try:
-            update_msg = WSMessage(
-                type=WebSocketOpCode.STATE_UPDATE,
-                payload={
-                    "game_id": game_id,
-                    "trigger_event": {
-                        "type": action_type,
-                        "user_id": user_id,
-                        "payload": event_payload
-                    }
-                }
-            )
-            await manager.broadcast(game_id, update_msg)
-        except Exception as e:
-            # 广播失败不应影响主流程
-            print(f"Broadcast failed: {e}")
-            
+        # 4. 广播更新
+        await manager.broadcast_game_update(game_id, game)
+        
+        # 5. 触发 AI 逻辑 (异步)
+        asyncio.create_task(GameService._trigger_ai_logic(game_id))
+        
         return game
 
     @staticmethod

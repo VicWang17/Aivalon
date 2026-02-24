@@ -37,8 +37,9 @@
             v-for="(player, index) in players" 
             :key="player.user_id"
             class="player-seat"
-            :class="getPlayerClasses(player, index)"
+            :class="getPlayerClasses(player)"
             :style="getSeatStyle(index, players.length)"
+            @click="toggleSelection(player.user_id)"
           >
             <div class="avatar-wrapper">
               <div class="avatar">
@@ -60,6 +61,12 @@
             <div v-if="player.character" class="character-tag" :class="getCharacterClass(player.character)">
               {{ player.character }}
             </div>
+            <div v-else-if="player.is_seen_as_merlin" class="character-tag text-merlin" title="可能是梅林或莫甘娜">
+              MERLIN?
+            </div>
+            <div v-else-if="player.is_seen_as_evil" class="character-tag text-evil" title="已知是坏人">
+              EVIL
+            </div>
           </div>
         </div>
       </main>
@@ -69,7 +76,7 @@
         <div class="chat-header">
           <h3>会议记录</h3>
         </div>
-        <div class="chat-history" ref="chatHistoryRef">
+        <div class="chat-history">
           <div v-if="gameState?.speech_history?.length === 0" class="empty-tip">暂无发言</div>
           <div 
             v-for="(msg, idx) in gameState?.speech_history" 
@@ -85,17 +92,22 @@
           </div>
         </div>
         
-        <div class="chat-input-area" v-if="gameState?.phase === 'SPEECH'">
+        <div class="chat-input-area" v-if="gameState?.phase === GamePhase.SPEECH">
           <div class="input-wrapper">
             <textarea 
               v-model="speechInput" 
-              :placeholder="isMyTurn ? '请输入发言内容...' : `等待 ${getPlayerName(gameState.speaker_id || 0)} 发言...`" 
+              :placeholder="isMyTurn ? '请输入发言内容(至少5个字)...' : `等待 ${getPlayerName(gameState.speaker_id || 0)} 发言...`" 
               :disabled="!isMyTurn"
               @keydown.enter.prevent="handleSendSpeech(false)"
             ></textarea>
             <div class="input-actions">
-              <button class="btn-primary btn-sm" @click="handleSendSpeech(false)" :disabled="!isMyTurn || !speechInput.trim()">发送</button>
-              <button class="btn-warning btn-sm" @click="handleSendSpeech(true)" :disabled="!isMyTurn">结束发言</button>
+              <button 
+                class="btn-primary btn-sm" 
+                @click="handleSendSpeech(true)" 
+                :disabled="!isMyTurn || speechInput.length < 5"
+              >
+                发送并结束发言
+              </button>
             </div>
           </div>
         </div>
@@ -122,29 +134,50 @@
           <!-- 发言阶段 (已移至聊天窗口) -->
           
           <!-- 提名阶段 -->
-          <button v-if="gameState?.phase === 'TEAM_PROPOSAL'" class="btn-primary" @click="handleAction('PROPOSE')">
-            确认提名
-          </button>
+          <div v-if="gameState?.phase === GamePhase.TEAM_PROPOSAL" class="propose-actions">
+            <div class="action-tip">
+              请选择 {{ requiredTeamSize }} 名玩家执行任务 (已选 {{ selectedPlayerIds.length }})
+            </div>
+            <button 
+              class="btn-primary" 
+              @click="handleAction(ActionType.PROPOSE, { target_ids: selectedPlayerIds })"
+              :disabled="selectedPlayerIds.length !== requiredTeamSize"
+            >
+              确认提名
+            </button>
+          </div>
           
           <!-- 投票阶段 -->
-          <div v-if="gameState?.phase === 'VOTE'" class="vote-buttons">
-            <button class="btn-success" @click="handleAction('VOTE', { option: 'approve' })">同意</button>
-            <button class="btn-danger" @click="handleAction('VOTE', { option: 'reject' })">反对</button>
+          <div v-if="gameState?.phase === GamePhase.VOTE" class="vote-buttons">
+            <button class="btn-success" @click="handleAction(ActionType.VOTE, { option: VoteOption.APPROVE })">同意</button>
+            <button class="btn-danger" @click="handleAction(ActionType.VOTE, { option: VoteOption.REJECT })">反对</button>
           </div>
           
            <!-- 任务阶段 -->
-          <div v-if="gameState?.phase === 'MISSION'" class="mission-buttons">
-            <button class="btn-success" @click="handleAction('MISSION', { result: 'success' })">成功</button>
-            <button class="btn-danger" @click="handleAction('MISSION', { result: 'fail' })">失败</button>
+          <div v-if="gameState?.phase === GamePhase.MISSION" class="mission-buttons">
+            <button class="btn-success" @click="handleAction(ActionType.MISSION, { result: MissionResult.SUCCESS })">成功</button>
+            <button class="btn-danger" @click="handleAction(ActionType.MISSION, { result: MissionResult.FAIL })">失败</button>
           </div>
 
           <!-- 刺杀阶段 -->
-          <div v-if="gameState?.phase === 'ASSASSINATION'" class="assassin-actions">
-            <span class="action-tip">请点击场上玩家头像进行刺杀，或点击确认</span>
-            <!-- 实际刺杀逻辑通常是点击头像选中 target_id，然后点确认 -->
-            <!-- 这里暂时只放一个占位按钮，具体交互待细化 -->
-            <button class="btn-danger" disabled>确认刺杀</button>
+          <div v-if="gameState?.phase === GamePhase.ASSASSINATION" class="assassin-actions">
+            <span class="action-tip">请点击场上玩家头像进行刺杀 (已选: {{ getPlayerName(selectedPlayerIds[0] || 0) }})</span>
+            <button 
+              class="btn-danger" 
+              @click="handleAction(ActionType.ASSASSINATE, { target_id: selectedPlayerIds[0] })"
+              :disabled="selectedPlayerIds.length !== 1"
+            >
+              确认刺杀
+            </button>
           </div>
+        </div>
+        <div v-else-if="gameState?.phase === GamePhase.FINISHED" class="game-over-actions">
+          <div class="result-text">
+            游戏结束，{{ gameState.winner === 'good' ? '好人' : '坏人' }} 阵营胜利！
+          </div>
+          <button class="btn-primary" @click="router.push('/')">
+            返回首页
+          </button>
         </div>
         <div v-else class="waiting-text">
           等待其他玩家操作...
@@ -155,12 +188,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, onUnmounted } from 'vue'
+import { ref, onMounted, computed, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getGameState, submitAction } from '../api/game'
 import { useUserStore } from '../store/user'
 import type { GameState, PlayerState } from '../types/api'
-import { GamePhase, Character, MissionResult } from '../types/api'
+import { GamePhase, Character, MissionResult, ActionType, VoteOption } from '../types/api'
 import { GameSocket } from '../utils/socket'
 import { WebSocketOpCode } from '../types/protocol'
 
@@ -171,11 +204,30 @@ const userStore = useUserStore()
 const gameId = route.params.gameId as string
 const gameState = ref<GameState | null>(null)
 const speechInput = ref('')
-const chatHistoryRef = ref<HTMLElement | null>(null)
+const selectedPlayerIds = ref<number[]>([])
+// const chatHistoryRef = ref<HTMLElement | null>(null)
 let socket: GameSocket | null = null
 
 // 计算属性
 const players = computed(() => gameState.value?.players || [])
+
+const requiredTeamSize = computed(() => {
+  if (!gameState.value) return 0
+  const playerCount = gameState.value.players.length
+  const round = gameState.value.round
+  
+  // Basic lookup table for standard Avalon
+  const missionConfig: Record<number, Record<number, number>> = {
+    5: { 1: 2, 2: 3, 3: 2, 4: 3, 5: 3 },
+    6: { 1: 2, 2: 3, 3: 4, 4: 3, 5: 4 },
+    7: { 1: 2, 2: 3, 3: 3, 4: 4, 5: 4 },
+    8: { 1: 3, 2: 4, 3: 4, 4: 5, 5: 5 },
+    9: { 1: 3, 2: 4, 3: 4, 4: 5, 5: 5 },
+    10: { 1: 3, 2: 4, 3: 4, 4: 5, 5: 5 },
+  }
+  
+  return missionConfig[playerCount]?.[round] || 0
+})
 
 const isMyTurn = computed(() => {
   if (!gameState.value || !userStore.userInfo) return false
@@ -236,9 +288,9 @@ const getPlayerName = (id: number) => {
 }
 
 const handleSendSpeech = async (isEnd: boolean) => {
-  if (!isEnd && !speechInput.value.trim()) return
+  if (!speechInput.value.trim() || speechInput.value.trim().length < 5) return
   
-  await handleAction('SPEAK', {
+  await handleAction(ActionType.SPEAK, {
     content: speechInput.value,
     is_end: isEnd
   })
@@ -263,12 +315,40 @@ const handleAction = async (type: string, payload: any = {}) => {
     // 动作提交后立即刷新一次状态
   } catch (error) {
     console.error('Action failed', error)
-    alert('操作失败: ' + (error as any).message)
+    const msg = (error as any).response?.data?.detail || (error as any).message || '未知错误'
+    alert('操作失败: ' + msg)
   }
 }
 
 const handleRefresh = async () => {
   await fetchGameState()
+}
+
+const toggleSelection = (userId: number) => {
+  // 仅在提名阶段且是队长时允许选择
+  const isProposalPhase = gameState.value?.phase === GamePhase.TEAM_PROPOSAL && gameState.value?.leader_id === userStore.userInfo?.id
+  const isAssassinationPhase = gameState.value?.phase === GamePhase.ASSASSINATION && isMyTurn.value
+  
+  if (!isProposalPhase && !isAssassinationPhase) return
+  
+  const index = selectedPlayerIds.value.indexOf(userId)
+  if (index > -1) {
+    selectedPlayerIds.value.splice(index, 1)
+  } else {
+    // Check if limit reached
+    const limit = isAssassinationPhase ? 1 : requiredTeamSize.value
+    
+    if (selectedPlayerIds.value.length >= limit) {
+        // 如果是刺杀阶段，选择新的目标时自动替换旧目标
+        if (isAssassinationPhase) {
+          selectedPlayerIds.value = [userId]
+          return
+        }
+        // alert(`本轮任务只能选择 ${limit} 名玩家`)
+        return
+    }
+    selectedPlayerIds.value.push(userId)
+  }
 }
 
 // 辅助样式方法
@@ -280,11 +360,12 @@ const getSeatStyle = (index: number, total: number) => {
   }
 }
 
-const getPlayerClasses = (player: PlayerState, index: number) => {
+const getPlayerClasses = (player: PlayerState) => {
   return {
     'is-me': player.user_id === userStore.userInfo?.id,
     'is-leader': player.user_id === gameState.value?.leader_id,
-    'in-team': gameState.value?.proposed_team.includes(player.user_id)
+    'in-team': gameState.value?.proposed_team.includes(player.user_id),
+    'is-selected': selectedPlayerIds.value.includes(player.user_id)
   }
 }
 
@@ -304,8 +385,21 @@ const getMissionClass = (index: number) => {
   return ''
 }
 
+// 监听游戏状态变化
+watch(
+  () => [gameState.value?.phase, gameState.value?.round],
+  ([newPhase, newRound], [oldPhase, oldRound]) => {
+    if (newPhase !== oldPhase || newRound !== oldRound) {
+      selectedPlayerIds.value = []
+    }
+  }
+)
+
 // 生命周期
-onMounted(() => {
+onMounted(async () => {
+  if (!userStore.userInfo && userStore.token) {
+    await userStore.fetchUserInfo()
+  }
   fetchGameState()
   
   if (gameId) {
@@ -329,7 +423,7 @@ onUnmounted(() => {
 
 <style scoped>
 .game-container {
-  min-height: 100vh;
+  height: 100vh;
   background: var(--bg-main);
   color: var(--text-primary);
   display: flex;
@@ -389,8 +483,9 @@ onUnmounted(() => {
   gap: 20px;
   padding: 20px;
   width: 100%;
-  height: calc(100vh - 140px);
   position: relative;
+  overflow: hidden; /* 防止主布局本身滚动 */
+  min-height: 0; /* 允许 flex item 压缩 */
 }
 
 /* Board */
@@ -438,6 +533,7 @@ onUnmounted(() => {
 /* Chat Panel */
 .chat-panel {
   width: 400px;
+  height: 100%;
   margin-right: 40px;
   display: flex;
   flex-direction: column;
@@ -446,9 +542,11 @@ onUnmounted(() => {
   border-radius: 12px;
   overflow: hidden;
   backdrop-filter: blur(10px);
+  min-height: 0; /* 确保在 flex 容器中能够正确收缩 */
 }
 
 .chat-header {
+  flex-shrink: 0;
   padding: 12px 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(0, 0, 0, 0.2);
@@ -467,6 +565,26 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-height: 0; /* 确保滚动容器正确收缩 */
+}
+
+/* Custom Scrollbar */
+.chat-history::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-history::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+.chat-history::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+.chat-history::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
 }
 
 .empty-tip {
@@ -605,6 +723,13 @@ onUnmounted(() => {
   box-shadow: 0 0 10px rgba(16, 185, 129, 0.4);
 }
 
+.player-seat.is-selected .avatar {
+  border-color: #fbbf24;
+  box-shadow: 0 0 15px rgba(251, 191, 36, 0.6);
+  transform: scale(1.15);
+  cursor: pointer;
+}
+
 .badges {
   position: absolute;
   top: -10px;
@@ -650,6 +775,7 @@ onUnmounted(() => {
 
 .text-good { color: #60a5fa; }
 .text-evil { color: #f87171; }
+.text-merlin { color: #a78bfa; } /* Purple for Merlin/Morgana */
 
 /* Footer */
 .game-footer {

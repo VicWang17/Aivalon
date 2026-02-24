@@ -36,4 +36,26 @@ class ConnectionManager:
                     # 发送失败通常意味着连接已断开，可以在这里处理，或者依赖 disconnect 回调
                     pass
 
+    async def broadcast_game_update(self, game_id: str, game_state: object):
+        """
+        广播对局状态更新消息
+        前端收到此消息后，应立即调用 GET /games/{game_id} 拉取最新状态
+        """
+        # 注意：这里 game_state 的类型是 GameState，为了避免循环导入，用了 object
+        # 实际上我们只需要 game_id，但为了扩展性可以传更多信息
+        # 目前主要通知前端去拉取，所以 payload 可以简化
+        try:
+            update_msg = WSMessage(
+                type=WebSocketOpCode.STATE_UPDATE,
+                payload={
+                    "game_id": game_id,
+                    "phase": game_state.phase if hasattr(game_state, 'phase') else None,
+                    "timestamp": getattr(game_state, 'phase_start_time', 0.0)
+                }
+            )
+            await self.broadcast(game_id, update_msg)
+        except Exception as e:
+            # 广播失败不应影响主流程
+            print(f"Broadcast failed: {e}")
+
 manager = ConnectionManager()

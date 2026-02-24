@@ -54,25 +54,25 @@ export interface UserInfo {
 
 // 游戏相关类型定义
 export const GamePhase = {
-  LEADER_SELECTION: "LEADER_SELECTION",
-  SPEECH: "SPEECH",
-  TEAM_PROPOSAL: "TEAM_PROPOSAL",
-  VOTE: "VOTE",
-  MISSION: "MISSION",
-  ASSASSINATION: "ASSASSINATION",
-  FINISHED: "FINISHED"
+  LEADER_SELECTION: "leader_selection",
+  SPEECH: "speech",
+  TEAM_PROPOSAL: "team_proposal",
+  VOTE: "vote",
+  MISSION: "mission",
+  ASSASSINATION: "assassination",
+  FINISHED: "finished"
 } as const;
 export type GamePhase = typeof GamePhase[keyof typeof GamePhase];
 
 export const Character = {
-  MERLIN: "Merlin",
-  PERCIVAL: "Percival",
-  SERVANT: "Loyal Servant of Arthur",
-  MORGANA: "Morgana",
-  ASSASSIN: "Assassin",
-  MINION: "Minion of Mordred",
-  OBERON: "Oberon",
-  MORDRED: "Mordred"
+  MERLIN: "merlin",
+  PERCIVAL: "percival",
+  SERVANT: "servant",
+  MORGANA: "morgana",
+  ASSASSIN: "assassin",
+  MINION: "minion",
+  OBERON: "oberon",
+  MORDRED: "mordred"
 } as const;
 export type Character = typeof Character[keyof typeof Character];
 
@@ -89,11 +89,11 @@ export const MissionResult = {
 export type MissionResult = typeof MissionResult[keyof typeof MissionResult];
 
 export const ActionType = {
-  PROPOSE: "PROPOSE",
-  VOTE: "VOTE",
-  MISSION: "MISSION",
-  ASSASSINATE: "ASSASSINATE",
-  SPEAK: "SPEAK"
+  PROPOSE: "propose",
+  VOTE: "vote",
+  MISSION: "mission",
+  ASSASSINATE: "assassinate",
+  SPEAK: "speak"
 } as const;
 export type ActionType = typeof ActionType[keyof typeof ActionType];
 

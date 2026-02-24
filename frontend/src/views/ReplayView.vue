@@ -73,6 +73,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { getGameEvents } from '../api/game'
 import type { GameEvent } from '../types/api'
+import { ActionType } from '../types/api'
 
 const route = useRoute()
 const gameId = computed(() => route.params.gameId as string)
@@ -141,11 +142,11 @@ const jumpTo = (index: number) => {
 const formatEventType = (type: string) => {
   const map: Record<string, string> = {
     'GAME_START': '游戏开始',
-    'PROPOSE': '提名',
-    'VOTE': '投票',
-    'MISSION': '执行任务',
-    'ASSASSINATE': '刺杀',
-    'SPEAK': '发言',
+    [ActionType.PROPOSE]: '提名',
+    [ActionType.VOTE]: '投票',
+    [ActionType.MISSION]: '执行任务',
+    [ActionType.ASSASSINATE]: '刺杀',
+    [ActionType.SPEAK]: '发言',
     'STATE_UPDATE': '状态更新'
   }
   return map[type] || type
@@ -156,10 +157,10 @@ const formatTime = (timeStr: string) => {
 }
 
 const getEventSummary = (event: GameEvent) => {
-  if (event.event_type === 'SPEAK') {
+  if (event.event_type === ActionType.SPEAK) {
     return event.payload.content?.slice(0, 20) + '...'
   }
-  if (event.event_type === 'PROPOSE') {
+  if (event.event_type === ActionType.PROPOSE) {
     return `提议队伍: ${event.payload.proposed_team}`
   }
   return JSON.stringify(event.payload).slice(0, 30)
