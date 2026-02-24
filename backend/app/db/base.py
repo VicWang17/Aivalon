@@ -23,6 +23,7 @@ engine = create_engine(
     SQLALCHEMY_DATABASE_URL, 
     pool_pre_ping=True,  # 自动重连
     pool_recycle=3600,   # 连接回收时间
+    isolation_level="READ COMMITTED", # 优化并发性能，减少死锁，便于乐观锁实现
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

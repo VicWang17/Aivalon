@@ -30,6 +30,11 @@
             <span class="icon">⚔️</span>
             <span>开启圆桌会议</span>
           </button>
+          
+          <router-link to="/history" class="btn-ghost btn-large mt-4">
+            <span class="icon">📜</span>
+            <span>查看对局历史</span>
+          </router-link>
         </div>
       </div>
     </main>

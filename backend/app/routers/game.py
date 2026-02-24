@@ -4,7 +4,7 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from app.schemas.game import GameCreateRequest, GameCreateResponse, GameState, GameActionRequest
+from app.schemas.game import GameCreateRequest, GameCreateResponse, GameState, GameActionRequest, GameSummary, GameEventSchema
 from app.services.game_service import GameService
 from app.core.deps import get_current_user
 from app.models.user import User
@@ -47,6 +47,41 @@ async def create_game(
         game_id=game_state.game_id,
         initial_state=game_state
     )
+
+@router.get("/history", response_model=List[GameSummary])
+async def get_my_game_history(
+    skip: int = 0,
+    limit: int = 20,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    获取当前用户的对局历史（按时间倒序）
+    """
+    # 直接调用 Service 获取
+    games = GameService.get_user_games(current_user.id, skip=skip, limit=limit)
+    return games
+
+@router.get("/{game_id}/events", response_model=List[GameEventSchema])
+async def get_game_events(
+    game_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    获取对局的所有事件流（回放用）
+    """
+    # 1. 检查游戏是否存在（Service 会查库）
+    events = GameService.get_game_events(game_id)
+    if not events:
+        # 如果没有事件，可能游戏未开始或不存在
+        # 再确认一下游戏是否存在
+        game = GameService.get_game(game_id)
+        if not game:
+             # 如果内存也没有，那就真没有了
+             # 实际上 get_game_events 是查库，如果库里没事件，但游戏在进行中，也是空列表
+             # 这里简单返回空列表即可，或者抛出 404 如果游戏ID无效
+             pass
+    
+    return events
 
 @router.get("/{game_id}", response_model=GameState)
 async def get_game_state(

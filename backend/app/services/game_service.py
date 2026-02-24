@@ -9,6 +9,11 @@ import time
 from fastapi import HTTPException, status
 from app.schemas.game import GameState, PlayerState, ChatMessage
 from app.models.game_enums import GamePhase, Character, Camp, ActionType, VoteOption, MissionResult
+from app.models.game import Game as GameModel, GameEvent as GameEventModel
+from app.db.base import SessionLocal
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+import json
 
 # 内存存储，用于临时保存对局状态
 # key: game_id, value: GameState
@@ -24,6 +29,53 @@ from app.core.socket_manager import manager
 from app.schemas.protocol import WSMessage, WebSocketOpCode
 
 class GameService:
+    @staticmethod
+    def _append_event(db: Session, game_id: str, event_type: str, player_id: Optional[int], payload: dict) -> None:
+        """
+        向 game_events 表追加事件，并自动处理 seq (带乐观锁重试)
+        """
+        from sqlalchemy.exc import IntegrityError
+        
+        max_retries = 20  # 提高重试次数以应对高并发
+        for attempt in range(max_retries):
+            try:
+                # 使用 savepoint 隔离每次尝试
+                with db.begin_nested():
+                    # 1. 重新获取当前最大 seq (READ COMMITTED 下可见最新提交)
+                    # 这样可以避免盲目递增导致的竞争落后
+                    last_event = db.query(GameEventModel).filter(
+                        GameEventModel.game_id == game_id
+                    ).order_by(GameEventModel.seq.desc()).first()
+                    
+                    next_seq = 1
+                    if last_event:
+                        next_seq = last_event.seq + 1
+                        
+                    # 2. 尝试插入新事件
+                    new_event = GameEventModel(
+                        game_id=game_id,
+                        seq=next_seq,
+                        event_type=event_type,
+                        player_id=player_id,
+                        payload=payload
+                    )
+                    db.add(new_event)
+                    db.flush() # 立即触发唯一约束检查
+                
+                # 成功则跳出循环
+                break
+                
+            except IntegrityError:
+                # 发生冲突（seq 被抢占）
+                if attempt == max_retries - 1:
+                    # 超过重试次数，抛出异常
+                    # 此时外部事务需要处理回滚
+                    raise 
+                
+                # 注意：begin_nested() 失败会自动回滚到 savepoint，
+                # 下一次循环会重新查询最新的 seq
+                continue
+
     @staticmethod
     async def create_game(player_ids: List[int], user_map: Dict[int, str], creator_id: Optional[int] = None) -> GameState:
         """
@@ -95,6 +147,41 @@ class GameService:
         # 5. 保存到内存
         games[game_id] = initial_state
         
+        # 6. 保存到数据库 (双写)
+        db = SessionLocal()
+        try:
+            # 6.1 创建 Game 记录
+            new_game_record = GameModel(
+                id=game_id,
+                status="playing",
+                player_ids=player_ids,
+                winner=None
+            )
+            db.add(new_game_record)
+            
+            # 6.2 记录 GAME_START 事件
+            GameService._append_event(
+                db, 
+                game_id, 
+                "GAME_START", 
+                creator_id, 
+                {
+                    "players": [p.model_dump() for p in players],
+                    "roles": [p.character for p in players], # 注意：这里记录了所有人的身份，属于上帝视角的日志
+                    "initial_leader": initial_leader_id
+                }
+            )
+            
+            db.commit()
+        except Exception as e:
+            print(f"Failed to persist game {game_id}: {e}")
+            db.rollback()
+            # 这里可以选择是否抛出异常中断创建，或者降级为仅内存模式
+            # 为了数据一致性，建议抛出异常
+            raise HTTPException(status_code=500, detail="Failed to create game persistence")
+        finally:
+            db.close()
+
         # TODO: 初始阶段如果是 AI 队长发言，需要触发 AI
         # if initial_state.speaker_id is AI:
         #    trigger_ai()
@@ -174,21 +261,15 @@ class GameService:
             raise HTTPException(status_code=404, detail="Game not found")
 
         # 1. 规则校验
-        # 这里的 validator 应该是无状态的，或者传入 game state
-        # 我们假设 GameRuleValidator.validate_action(game, user_id, action_type, payload)
-        # 注意：需要从 app.core.game_rules 导入 GameRuleValidator，为了避免循环依赖，可以在函数内导入
         from app.core.game_rules import GameRuleValidator
-        
-        # 校验动作是否合法
-        # 如果不合法，validator 会抛出异常（或者返回 False，这里假设它抛异常更方便）
         try:
             GameRuleValidator.validate_action(game, user_id, action_type, payload)
         except ValueError as e:
              raise HTTPException(status_code=400, detail=str(e))
 
         # 2. 执行动作（状态机流转）
-        # 这里需要一个 StateMachine 或类似的逻辑来更新 game state
-        # 暂时在 Service 内部简单实现流转逻辑，后续可拆分
+        # 准备事件日志数据
+        event_payload = payload.copy()
         
         # 找到当前操作的玩家
         player = next((p for p in game.players if p.user_id == user_id), None)
@@ -217,6 +298,14 @@ class GameService:
             if all(p.has_voted for p in game.players):
                 # 结算投票结果
                 approve_count = sum(1 for v in game.votes.values() if v == VoteOption.APPROVE)
+                
+                # 记录投票结果到事件日志
+                event_payload["vote_result"] = {
+                    "approved": approve_count,
+                    "rejected": len(game.players) - approve_count,
+                    "details": game.votes.copy() # 公开每个人投了什么
+                }
+
                 if approve_count > len(game.players) / 2:
                     # 投票通过 -> 进入任务阶段
                     game.phase = GamePhase.MISSION
@@ -250,26 +339,30 @@ class GameService:
         # --- MISSION (执行任务) ---
         elif action_type == ActionType.MISSION:
             result = payload.get("result")
-            # 只有在队伍里的人才能提交，这点已经在 validate_action 里校验过了
-            # 这里我们需要记录谁提交了，但不能记录具体是谁投了什么（匿名）
-            # 所以我们通常把结果存到一个临时列表里，等人齐了再 shuffle
-            # 但为了简单，我们先不存中间状态，只标记 has_acted
-            # 实际结果需要找个地方存... GameState 里好像没有 pending_mission_results
-            # MVP 简单做法：直接存到 mission_results 的当前轮次里？不行，那是最终结果
-            # 我们需要在 GameState 加一个临时字段，或者...
-            # 让我们简化一下：假设 payload 里的 result 是真实的
-            # 我们需要一个地方暂存本轮收到的结果
+            # 只有在队伍里的人才能提交
             if not hasattr(game, "pending_mission_results"):
                 game.pending_mission_results = [] # 这是一个 hack，最好加到 Schema 里
             
             game.pending_mission_results.append(result)
             player.has_acted = True
             
+            # 任务结果是私密的，事件日志里不能记录具体是谁投了什么
+            # 这里需要注意：event_payload 可能会被前端看到，所以不能把 result 放进去
+            # 或者我们在写入数据库时，对于 mission 动作，要把 result 抹去？
+            # 实际上，action_type=MISSION 的事件是“某人提交了任务”，但不包含结果
+            # 真正的结果要在所有人都提交后，生成一个新的事件 "MISSION_RESULT"
+            if "result" in event_payload:
+                del event_payload["result"] # 保护隐私
+            
             # 检查是否所有队员都提交了
             team_size = len(game.proposed_team)
             if len(game.pending_mission_results) >= team_size:
                 # 结算任务
-                fail_count = game.pending_mission_results.count(MissionResult.FAIL)
+                # 需要先把结果打乱，虽然我们这里只有 count，但也模拟一下流程
+                mission_results_shuffled = game.pending_mission_results.copy()
+                random.shuffle(mission_results_shuffled)
+                
+                fail_count = mission_results_shuffled.count(MissionResult.FAIL)
                 
                 # 判断失败条件
                 # 8人局：3-4-4-5-5
@@ -285,6 +378,15 @@ class GameService:
                 final_result = MissionResult.FAIL if is_failed else MissionResult.SUCCESS
                 game.mission_results.append(final_result)
                 
+                # 触发一个额外的事件：任务结果揭晓
+                # 这个事件不由玩家触发，而是系统触发
+                # 我们稍后在写入数据库时处理
+                event_payload["mission_outcome"] = {
+                    "round": game.round,
+                    "fails": fail_count,
+                    "result": final_result
+                }
+
                 # 清理临时状态
                 game.pending_mission_results = []
                 game.proposed_team = []
@@ -367,13 +469,7 @@ class GameService:
                 
                 if next_speaker_id:
                     game.speaker_id = next_speaker_id
-                    
-                    # TODO: 检测 next_speaker_id 是否为 AI
-                    # 如果是 AI，则在此处触发 LLM 生成任务（异步）
-                    # next_player = next(p for p in game.players if p.user_id == next_speaker_id)
-                    # if next_player.is_ai:
-                    #     background_tasks.add_task(ai_service.generate_speech, game_id, next_speaker_id)
-                    
+                    # TODO: AI Trigger
                 else:
                     # 所有人都发言完毕，进入提名阶段
                     game.phase = GamePhase.TEAM_PROPOSAL
@@ -383,18 +479,78 @@ class GameService:
                         p.has_acted = False
                 
                 game.phase_start_time = time.time()
+        
+        # 3. 持久化事件与状态更新
+        db = SessionLocal()
+        try:
+            # 3.1 写入当前动作事件
+            GameService._append_event(db, game_id, action_type, user_id, event_payload)
+            
+            # 3.2 如果游戏结束，更新 Game 表状态
+            if game.phase == GamePhase.FINISHED:
+                game_record = db.query(GameModel).filter(GameModel.id == game_id).first()
+                if game_record:
+                    game_record.status = "finished"
+                    game_record.winner = game.winner
+                    game_record.finished_at = func.now()
+            
+            db.commit()
+        except Exception as e:
+            print(f"Failed to persist action for game {game_id}: {e}")
+            db.rollback()
+            # 即使持久化失败，内存状态已经更新，为了不卡死流程，暂不抛出异常
+            # 但生产环境应该有重试机制
+        finally:
+            db.close()
 
-        # 3. 广播状态更新事件
+        # 4. 广播状态更新事件
         # 前端收到此消息后，应立即调用 GET /games/{game_id} 拉取最新状态
-        # 这种方式避免了在 WebSocket 层处理复杂的视角脱敏逻辑
         try:
             update_msg = WSMessage(
                 type=WebSocketOpCode.STATE_UPDATE,
-                payload={"game_id": game_id}
+                payload={
+                    "game_id": game_id,
+                    "trigger_event": {
+                        "type": action_type,
+                        "user_id": user_id,
+                        "payload": event_payload
+                    }
+                }
             )
             await manager.broadcast(game_id, update_msg)
         except Exception as e:
             # 广播失败不应影响主流程
             print(f"Broadcast failed: {e}")
-
+            
         return game
+
+    @staticmethod
+    def get_user_games(user_id: int, skip: int = 0, limit: int = 20) -> List[GameModel]:
+        """
+        获取用户的对局历史
+        """
+        db = SessionLocal()
+        try:
+            # player_ids 是 JSON 数组，例如 [1, 2, 3]
+            # JSON_CONTAINS(target, candidate)
+            # 传入 str(user_id) 确保 MySQL 能正确匹配数字
+            games = db.query(GameModel).filter(
+                func.json_contains(GameModel.player_ids, str(user_id))
+            ).order_by(GameModel.created_at.desc()).offset(skip).limit(limit).all()
+            return games
+        finally:
+            db.close()
+
+    @staticmethod
+    def get_game_events(game_id: str) -> List[GameEventModel]:
+        """
+        获取对局的所有事件流
+        """
+        db = SessionLocal()
+        try:
+            events = db.query(GameEventModel).filter(
+                GameEventModel.game_id == game_id
+            ).order_by(GameEventModel.seq).all()
+            return events
+        finally:
+            db.close()

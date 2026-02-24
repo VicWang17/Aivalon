@@ -79,3 +79,31 @@ class GameActionRequest(BaseModel):
     # ASSASSINATE: {"target_id": 3}
     # SPEAK: {} (暂时为空，或包含语音/文本内容)
     payload: dict = {}
+
+from datetime import datetime
+from typing import Any, Dict
+
+class GameSummary(BaseModel):
+    """对局历史摘要"""
+    id: str
+    status: str
+    winner: Optional[str] = None
+    player_ids: List[int]
+    created_at: datetime
+    finished_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class GameEventSchema(BaseModel):
+    """对局事件详情"""
+    id: int
+    game_id: str
+    seq: int
+    event_type: str
+    player_id: Optional[int] = None
+    payload: Optional[Dict[str, Any]] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

@@ -5,7 +5,9 @@ import type {
   CreateGameRequest, 
   CreateGameResponse, 
   GameState, 
-  GameActionRequest 
+  GameActionRequest,
+  GameSummary,
+  GameEvent
 } from '../types/api'
 
 // 创建游戏
@@ -31,5 +33,22 @@ export function submitAction(gameId: string, data: GameActionRequest) {
     url: `/games/${gameId}/action`,
     method: 'post',
     data
+  })
+}
+
+// 获取游戏历史
+export function getGameHistory(params: { skip?: number; limit?: number } = {}) {
+  return request<any, GameSummary[]>({
+    url: '/games/history',
+    method: 'get',
+    params
+  })
+}
+
+// 获取游戏事件流
+export function getGameEvents(gameId: string) {
+  return request<any, GameEvent[]>({
+    url: `/games/${gameId}/events`,
+    method: 'get'
   })
 }

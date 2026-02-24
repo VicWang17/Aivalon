@@ -3,6 +3,7 @@ uvicorn[standard]>=0.27.0
 sqlalchemy>=2.0.25
 alembic>=1.13.1
 aiomysql>=0.2.0
+pymysql>=1.1.0
 redis>=5.0.1
 celery>=5.3.6
 python-jose[cryptography]>=3.3.0

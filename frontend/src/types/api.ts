@@ -97,6 +97,25 @@ export const ActionType = {
 } as const;
 export type ActionType = typeof ActionType[keyof typeof ActionType];
 
+export interface GameSummary {
+  id: string;
+  status: string;
+  winner: string | null;
+  player_ids: number[];
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface GameEvent {
+  id: number;
+  game_id: string;
+  seq: number;
+  event_type: string;
+  player_id: number | null;
+  payload: any;
+  created_at: string;
+}
+
 export interface PlayerState {
   user_id: number;
   username: string;

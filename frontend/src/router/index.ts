@@ -26,6 +26,18 @@ const routes = [
     name: 'Register',
     component: () => import('../views/RegisterView.vue'),
     meta: { guest: true }
+  },
+  {
+    path: '/history',
+    name: 'History',
+    component: () => import('../views/HistoryView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/replay/:gameId',
+    name: 'Replay',
+    component: () => import('../views/ReplayView.vue'),
+    meta: { requiresAuth: true }
   }
 ]
 

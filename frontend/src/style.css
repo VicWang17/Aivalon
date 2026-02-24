@@ -28,6 +28,10 @@
   /* Fonts */
   --font-heading: 'Cinzel', 'Playfair Display', serif;
   --font-body: 'Inter', system-ui, sans-serif;
+
+  --glass-bg: rgba(20, 20, 30, 0.7);
+  --glass-border: 1px solid rgba(255, 255, 255, 0.1);
+  --glass-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
 }
 
 body {
@@ -128,13 +132,29 @@ input:focus {
 
 .btn-ghost {
   background: transparent;
-  border: 1px solid transparent;
-  color: var(--color-text-accent);
+  border: 1px solid var(--color-text-secondary);
+  color: var(--color-text-secondary);
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.3s;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 
 .btn-ghost:hover {
-  border-color: var(--color-text-accent);
-  background: rgba(251, 191, 36, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--color-text-primary);
+  color: var(--color-text-primary);
+}
+
+.btn-ghost.btn-large {
+  padding: 12px 24px;
+  font-size: 1.1em;
+  min-width: 200px;
 }
 
 .text-accent {
@@ -159,9 +179,8 @@ input:focus {
   width: 100%;
 }
 
-.mt-4 {
-  margin-top: 1rem;
-}
+.mt-4 { margin-top: 1rem; }
+.mt-8 { margin-top: 2rem; }
 
 .mb-4 {
   margin-bottom: 1rem;
