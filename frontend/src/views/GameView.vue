@@ -222,7 +222,10 @@ const currentPhaseText = computed(() => {
 const fetchGameState = async () => {
   try {
     const res = await getGameState(gameId)
-    gameState.value = res.data
+    // 兼容多种响应结构: ResponseModel 或 AxiosResponse
+    const responseData = (res as any).data || res
+    const realData = (responseData.code === 0 && responseData.data) ? responseData.data : responseData
+    gameState.value = realData
   } catch (error) {
     console.error('Fetch game failed', error)
   }
@@ -253,7 +256,10 @@ const handleAction = async (type: string, payload: any = {}) => {
       action_type: type as any,
       payload
     })
-    gameState.value = res.data
+    // 兼容多种响应结构
+    const responseData = (res as any).data || res
+    const realData = (responseData.code === 0 && responseData.data) ? responseData.data : responseData
+    gameState.value = realData
     // 动作提交后立即刷新一次状态
   } catch (error) {
     console.error('Action failed', error)

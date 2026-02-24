@@ -81,21 +81,48 @@ const handleStartGame = async () => {
     const playerIds = [myId, ...botIds]
     
     const res = await createGame({ player_ids: playerIds })
-    // request 拦截器调整后，直接返回 response 对象（如果不是标准 code 结构）
-    // 或者返回 response.data（取决于拦截器具体实现）
-    // 这里我们假设后端返回的是 GameCreateResponse Pydantic 模型
-    // 它没有 code 包装，所以 request 拦截器会返回 response
-    // 我们的 createGame 定义返回的是 request<..., ApiResponse<CreateGameResponse>>
-    // 但实际上后端返回的是直接的 JSON
+    console.log('Create Game Response:', res)
+
+    // 调试：打印响应结构
+    // alert(`Debug: ${JSON.stringify(res)}`)
+
+    // 兼容多种响应结构：
+    // 1. res 是 AxiosResponse，数据在 res.data
+    // 2. res 直接是数据对象（拦截器处理后）
+    // 3. 数据可能在 res.data.data (标准API结构) 或 res.data (直接Pydantic模型)
     
-    // 安全起见，做个兼容判断
-    const data = res.data || res
-    const gameId = data.game_id
+    let gameId: string | undefined
+    
+    // 安全地获取响应体
+    const responseBody = (res && (res as any).data) ? (res as any).data : res
+    
+    // 尝试从不同层级提取 game_id
+    if (responseBody) {
+      // Case 1: 直接在 responseBody 中 (例如拦截器返回了 res.data，且 res.data 就是 payload)
+      if (responseBody.game_id) {
+        gameId = responseBody.game_id
+      }
+      // Case 2: 在 responseBody.data 中 (例如拦截器返回了 res，且 res 是 ResponseModel)
+      else if (responseBody.data && responseBody.data.game_id) {
+        gameId = responseBody.data.game_id
+      }
+      // Case 3: 可能是嵌套的 (例如 AxiosResponse -> ResponseModel -> Payload)
+      // 如果 responseBody 是 ResponseModel (code, data)，而 data 又是对象
+      else if (responseBody.code === 0 && responseBody.data && responseBody.data.game_id) {
+         gameId = responseBody.data.game_id
+      }
+    }
     
     if (gameId) {
-      router.push(`/game/${gameId}`)
+      console.log('Redirecting to game:', gameId)
+      router.push(`/game/${gameId}`).catch(err => {
+        console.error('Router push failed:', err)
+        alert(`跳转失败: ${err.message}`)
+      })
     } else {
-      throw new Error('No game_id returned')
+      console.error('Invalid response structure:', res)
+      alert(`创建对局失败：无法获取 game_id。响应数据: ${JSON.stringify(res)}`)
+      throw new Error('No game_id returned from server')
     }
   } catch (error) {
     console.error('Create game failed', error)

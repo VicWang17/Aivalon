@@ -9,10 +9,11 @@ from app.services.game_service import GameService
 from app.core.deps import get_current_user
 from app.models.user import User
 from app.db.base import get_db
+from app.schemas.base import ResponseModel
 
 router = APIRouter()
 
-@router.post("/", response_model=GameCreateResponse)
+@router.post("/", response_model=ResponseModel[GameCreateResponse])
 async def create_game(
     request: GameCreateRequest,
     current_user: User = Depends(get_current_user),
@@ -43,12 +44,14 @@ async def create_game(
     # 5. 调用 Service 创建对局
     game_state = await GameService.create_game(request.player_ids, user_map, creator_id=current_user.id)
     
-    return GameCreateResponse(
-        game_id=game_state.game_id,
-        initial_state=game_state
+    return ResponseModel(
+        data=GameCreateResponse(
+            game_id=game_state.game_id,
+            initial_state=game_state
+        )
     )
 
-@router.get("/history", response_model=List[GameSummary])
+@router.get("/history", response_model=ResponseModel[List[GameSummary]])
 async def get_my_game_history(
     skip: int = 0,
     limit: int = 20,
@@ -59,9 +62,9 @@ async def get_my_game_history(
     """
     # 直接调用 Service 获取
     games = GameService.get_user_games(current_user.id, skip=skip, limit=limit)
-    return games
+    return ResponseModel(data=games)
 
-@router.get("/{game_id}/events", response_model=List[GameEventSchema])
+@router.get("/{game_id}/events", response_model=ResponseModel[List[GameEventSchema]])
 async def get_game_events(
     game_id: str,
     current_user: User = Depends(get_current_user)
@@ -81,9 +84,9 @@ async def get_game_events(
              # 这里简单返回空列表即可，或者抛出 404 如果游戏ID无效
              pass
     
-    return events
+    return ResponseModel(data=events)
 
-@router.get("/{game_id}", response_model=GameState)
+@router.get("/{game_id}", response_model=ResponseModel[GameState])
 async def get_game_state(
     game_id: str,
     current_user: User = Depends(get_current_user)
@@ -104,9 +107,9 @@ async def get_game_state(
     # Service 层会处理脱敏逻辑
     player_view = GameService.get_player_view(game, current_user.id)
     
-    return player_view
+    return ResponseModel(data=player_view)
 
-@router.post("/{game_id}/action", response_model=GameState)
+@router.post("/{game_id}/action", response_model=ResponseModel[GameState])
 async def submit_action(
     game_id: str,
     action: GameActionRequest,
@@ -133,4 +136,4 @@ async def submit_action(
     # 这样前端操作完后能立即拿到最新的、符合自己视角的快照
     player_view = GameService.get_player_view(updated_state, current_user.id)
     
-    return player_view
+    return ResponseModel(data=player_view)

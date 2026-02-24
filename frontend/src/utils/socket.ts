@@ -1,6 +1,7 @@
 // 这个文件封装了 WebSocket 客户端逻辑，处理连接、鉴权、心跳和消息分发。
 import { getToken } from './auth';
-import { WSMessage, WebSocketOpCode } from '../types/protocol';
+import { WebSocketOpCode } from '../types/protocol';
+import type { WSMessage } from '../types/protocol';
 
 type MessageHandler = (message: WSMessage) => void;
 

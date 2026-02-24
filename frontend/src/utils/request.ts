@@ -43,8 +43,9 @@ service.interceptors.response.use(
       return res
     }
     
-    // 如果没有 code 字段，说明是直接返回的数据（如 Pydantic Model），直接返回 response
-    return response
+    // 如果没有 code 字段，说明是直接返回的数据（如 Pydantic Model），直接返回 response.data
+    // 这样业务层就不需要再解包 AxiosResponse 了
+    return response.data
   },
   error => {
     console.error('Request Error:', error)
