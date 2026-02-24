@@ -348,6 +348,23 @@ class GameService:
                     "details": game.votes.copy() # 公开每个人投了什么
                 }
 
+                # --- 新增：将投票结果写入会议记录 ---
+                vote_details_str = []
+                for p in game.players:
+                    v_str = "同意" if game.votes.get(p.user_id) == VoteOption.APPROVE else "反对"
+                    vote_details_str.append(f"{p.username}: {v_str}")
+                
+                pass_str = "通过" if approve_count > len(game.players) / 2 else "不通过"
+                vote_summary = f"【投票结果】{pass_str} (同意: {approve_count}, 反对: {len(game.players) - approve_count})\n" + "  ".join(vote_details_str)
+                
+                game.speech_history.append(ChatMessage(
+                    user_id=0,
+                    username="系统",
+                    content=vote_summary,
+                    timestamp=time.time()
+                ))
+                # ----------------------------------
+
                 if approve_count > len(game.players) / 2:
                     # 投票通过 -> 进入任务阶段
                     game.phase = GamePhase.MISSION
@@ -429,6 +446,18 @@ class GameService:
                     "result": final_result
                 }
 
+                # --- 新增：将任务结果写入会议记录 ---
+                result_zh = "成功" if final_result == MissionResult.SUCCESS else "失败"
+                mission_summary = f"【第 {game.round} 轮任务结果】{result_zh}\n出现 {fail_count} 张反对票"
+                
+                game.speech_history.append(ChatMessage(
+                    user_id=0,
+                    username="系统",
+                    content=mission_summary,
+                    timestamp=time.time()
+                ))
+                # ----------------------------------
+
                 # 清理临时状态
                 game.pending_mission_results = []
                 game.proposed_team = []
@@ -484,13 +513,20 @@ class GameService:
 
             # 1. 记录发言
             if content:
-                msg = ChatMessage(
-                    user_id=user_id,
-                    username=player.username,
-                    content=content,
-                    timestamp=time.time()
-                )
-                game.speech_history.append(msg)
+                # 检查上一条消息是否是同一个人的发言（且不是系统消息）
+                # 如果是，则合并内容
+                if game.speech_history and game.speech_history[-1].user_id == user_id:
+                    game.speech_history[-1].content += "\n" + content
+                    # 更新时间戳为最新
+                    game.speech_history[-1].timestamp = time.time()
+                else:
+                    msg = ChatMessage(
+                        user_id=user_id,
+                        username=player.username,
+                        content=content,
+                        timestamp=time.time()
+                    )
+                    game.speech_history.append(msg)
 
             # 2. 处理结束发言
             if is_end:

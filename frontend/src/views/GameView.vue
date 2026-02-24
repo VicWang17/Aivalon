@@ -49,7 +49,9 @@
               <div class="badges">
                 <span v-if="player.user_id === gameState?.leader_id" class="badge leader" title="队长">👑</span>
                 <span v-if="player.user_id === gameState?.speaker_id" class="badge speaker" title="正在发言">🎙️</span>
-                <span v-if="player.has_voted" class="badge voted" title="已投票">🗳️</span>
+                <!-- <span v-if="gameState?.phase === GamePhase.VOTE && player.has_voted" class="badge voted" title="已投票">🗳️</span> -->
+                <span v-if="gameState?.phase !== GamePhase.VOTE && voteResultMap[player.user_id] === VoteOption.APPROVE" class="badge voted-approve" title="同意">🟢</span>
+                <span v-if="gameState?.phase !== GamePhase.VOTE && voteResultMap[player.user_id] === VoteOption.REJECT" class="badge voted-reject" title="反对">🔴</span>
               </div>
             </div>
             <div class="player-info">
@@ -82,7 +84,10 @@
             v-for="(msg, idx) in gameState?.speech_history" 
             :key="idx"
             class="chat-message"
-            :class="{ 'self': msg.user_id === userStore.userInfo?.id }"
+            :class="{ 
+              'self': msg.user_id === userStore.userInfo?.id,
+              'system': msg.user_id === 0
+            }"
           >
             <div class="msg-meta">
               <span class="msg-user">{{ msg.username }}</span>
@@ -96,9 +101,11 @@
           <div class="input-wrapper">
             <textarea 
               v-model="speechInput" 
-              :placeholder="isMyTurn ? '请输入发言内容(至少5个字)...' : `等待 ${getPlayerName(gameState.speaker_id || 0)} 发言...`" 
+              :placeholder="isMyTurn ? '请输入发言内容(至少5个字)... (Enter 发送，Ctrl+Enter 结束)' : `等待 ${getPlayerName(gameState.speaker_id || 0)} 发言...`" 
               :disabled="!isMyTurn"
-              @keydown.enter.prevent="handleSendSpeech(false)"
+              @keydown.enter.exact.prevent="handleSendSpeech(false)"
+              @keydown.ctrl.enter.prevent="handleSendSpeech(true)"
+              @keydown.meta.enter.prevent="handleSendSpeech(true)"
             ></textarea>
             <div class="input-actions">
               <button 
@@ -184,6 +191,9 @@
         </div>
       </div>
     </footer>
+    
+    <!-- 背景层 -->
+    <div class="bg-overlay"></div>
   </div>
 </template>
 
@@ -227,6 +237,11 @@ const requiredTeamSize = computed(() => {
   }
   
   return missionConfig[playerCount]?.[round] || 0
+})
+
+const voteResultMap = computed(() => {
+  if (!gameState.value?.votes) return {}
+  return gameState.value.votes
 })
 
 const isMyTurn = computed(() => {
@@ -424,7 +439,7 @@ onUnmounted(() => {
 <style scoped>
 .game-container {
   height: 100vh;
-  background: var(--bg-main);
+  background: transparent;
   color: var(--text-primary);
   display: flex;
   flex-direction: column;
@@ -434,6 +449,8 @@ onUnmounted(() => {
 
 /* Header */
 .game-header {
+  position: relative;
+  z-index: 10;
   height: 60px;
   display: flex;
   justify-content: space-between;
@@ -478,6 +495,8 @@ onUnmounted(() => {
 
 /* Layout */
 .game-main-layout {
+  position: relative;
+  z-index: 10;
   flex: 1;
   display: flex;
   gap: 20px;
@@ -496,7 +515,7 @@ onUnmounted(() => {
   justify-content: center;
   position: relative;
   /* Background */
-  background: radial-gradient(circle at center, #1a1b26 0%, #0f1016 100%);
+  background: transparent;
   border-radius: 12px;
 }
 
@@ -537,7 +556,7 @@ onUnmounted(() => {
   margin-right: 40px;
   display: flex;
   flex-direction: column;
-  background: rgba(30, 30, 40, 0.8);
+  background: rgba(30, 30, 40, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 12px;
   overflow: hidden;
@@ -606,6 +625,26 @@ onUnmounted(() => {
   align-self: flex-end;
 }
 
+.chat-message.system {
+  align-self: center;
+  max-width: 95%;
+  margin: 8px 0;
+}
+
+.chat-message.system .msg-content {
+  background: rgba(124, 58, 237, 0.2); /* 淡淡的紫色背景 */
+  border: 1px solid rgba(124, 58, 237, 0.4);
+  color: #e2e8f0;
+  text-align: left;
+  white-space: pre-wrap; /* 保留换行符 */
+}
+
+.chat-message.system .msg-meta {
+  justify-content: center;
+  color: var(--text-accent);
+  font-weight: bold;
+}
+
 .msg-meta {
   font-size: 12px;
   color: var(--text-secondary);
@@ -625,6 +664,8 @@ onUnmounted(() => {
   line-height: 1.4;
   color: var(--text-primary);
   border-top-left-radius: 2px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .self .msg-content {
@@ -779,6 +820,8 @@ onUnmounted(() => {
 
 /* Footer */
 .game-footer {
+  position: relative;
+  z-index: 10;
   height: 80px;
   display: flex;
   flex-direction: column;
@@ -892,5 +935,29 @@ onUnmounted(() => {
   padding: 0.5rem 1.5rem;
   border-radius: 4px;
   cursor: pointer;
+}
+
+/* Background */
+.bg-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-image: url('../assets/images/game_bg.png');
+  background-size: cover;
+  background-position: center;
+  z-index: 1;
+}
+
+.bg-overlay::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle at center, rgba(15, 16, 22, 0.4) 0%, rgba(15, 16, 22, 0.8) 100%);
+  backdrop-filter: blur(2px); /* 降低模糊度让背景更清晰 */
 }
 </style>
