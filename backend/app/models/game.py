@@ -11,7 +11,7 @@ class Game(Base):
     status = Column(String(32), nullable=False, default="created", comment="当前状态")
     winner = Column(String(16), nullable=True, comment="获胜阵营")
     player_ids = Column(JSON, nullable=False, comment="参与玩家ID列表")
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
     
     events = relationship("GameEvent", back_populates="game", order_by="GameEvent.seq")
