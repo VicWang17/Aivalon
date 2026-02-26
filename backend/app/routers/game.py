@@ -1,6 +1,7 @@
 """
 这个文件定义了对局相关的路由接口。
 """
+import random
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -12,6 +13,18 @@ from app.db.base import get_db
 from app.schemas.base import ResponseModel
 
 router = APIRouter()
+
+# AI 随机名字库
+AI_NAMES = [
+    "杰克", "罗恩", "詹姆斯", "哈利", "露娜", "纳威", "金妮", "弗雷德", "乔治",
+    "托马斯", "爱德华", "理查德", "亨利", "伊丽莎白", "维多利亚", "玛丽", "安妮",
+    "大卫", "迈克尔", "约翰", "威廉", "罗伯特", "查尔斯", "约瑟夫", "保罗", "马克",
+    "艾米", "艾丽", "艾玛", "奥利维亚", "索菲亚", "伊莎贝拉", "米娅", "夏洛特", "阿米莉亚",
+    "亚历山大", "本杰明", "卡尔", "丹尼尔", "埃里克", "弗兰克", "加布里埃尔", "雨果", "伊万",
+    "凯文", "利奥", "马克斯", "尼古拉斯", "奥斯卡", "彼得", "昆廷", "山姆", "蒂姆",
+    "爱丽丝", "贝蒂", "卡罗尔", "戴安娜", "伊娃", "菲奥娜", "格蕾丝", "海伦", "艾瑞斯",
+    "朱莉", "凯特", "莉莉", "莫莉", "诺拉", "佩妮", "瑞秋", "萨拉", "蒂娜", "温蒂"
+]
 
 @router.post("/", response_model=ResponseModel[GameCreateResponse])
 async def create_game(
@@ -36,10 +49,31 @@ async def create_game(
     # 3. 构建 ID 到 用户名 的映射
     user_map = {u.id: u.username for u in users}
     
-    # 4. 对于数据库中未找到的 ID（可能是测试用或已删除），使用默认名称填充
-    missing_ids = set(request.player_ids) - set(user_map.keys())
-    for uid in missing_ids:
-        user_map[uid] = f"User_{uid}"
+    # 4. 确定需要命名的 ID
+    # 策略：
+    # 1. 数据库没查到的 ID -> 必须随机命名
+    # 2. 数据库查到了，但名字是 User_ 开头的 -> 也随机命名（覆盖掉测试残留）
+    # 3. 排除当前用户（如果是 User_ 开头也不动它，除非用户自己改名）
+    
+    ids_to_rename = list(set(request.player_ids) - set(user_map.keys()))
+    
+    for uid, name in user_map.items():
+        # 如果不是自己，且名字看起来是默认生成的
+        if uid != current_user.id and name.startswith("User_"):
+            ids_to_rename.append(uid)
+    
+    # 去重
+    ids_to_rename = list(set(ids_to_rename))
+    
+    # 准备名字池
+    available_names = list(AI_NAMES)
+    random.shuffle(available_names)
+    
+    for uid in ids_to_rename:
+        if available_names:
+            user_map[uid] = available_names.pop()
+        else:
+            user_map[uid] = f"User_{uid}" # 名字不够用时回退到默认
 
     # 5. 调用 Service 创建对局
     game_state = await GameService.create_game(request.player_ids, user_map, creator_id=current_user.id)
