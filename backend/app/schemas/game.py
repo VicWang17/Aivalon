@@ -97,6 +97,13 @@ class GameSummary(BaseModel):
     created_at: datetime
     finished_at: Optional[datetime] = None
 
+class RecentGameSummary(BaseModel):
+    """最近对局摘要（Redis缓存用）"""
+    id: str
+    winner: Optional[str] = None
+    created_at: datetime
+    player_count: int
+
     class Config:
         from_attributes = True
 

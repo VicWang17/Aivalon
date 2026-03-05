@@ -7,8 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, status, Header
 from fastapi_limiter.depends import RateLimiter
 from sqlalchemy.orm import Session
 from redis.asyncio import Redis
-from app.schemas.game import GameCreateRequest, GameCreateResponse, GameState, GameActionRequest, GameSummary, GameEventSchema
+from app.schemas.game import GameCreateRequest, GameCreateResponse, GameState, GameActionRequest, GameSummary, GameEventSchema, RecentGameSummary
 from app.services.game_service import GameService
+from app.services.rank_service import RankService
 from app.core.deps import get_current_user
 from app.core.redis import get_redis
 from app.core.idempotency import IdempotencyManager
@@ -88,6 +89,16 @@ async def create_game(
             initial_state=game_state
         )
     )
+
+@router.get("/recent", response_model=ResponseModel[List[RecentGameSummary]])
+async def get_recent_games(
+    limit: int = 10
+):
+    """
+    获取最近已完成的对局摘要（全站范围，Redis缓存加速）
+    """
+    games = await RankService.get_recent_games(limit)
+    return ResponseModel(data=games)
 
 @router.get("/history", response_model=ResponseModel[List[GameSummary]])
 async def get_my_game_history(

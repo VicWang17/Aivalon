@@ -10,6 +10,7 @@ class Game(Base):
     id = Column(String(36), primary_key=True, index=True, comment="对局ID (UUID)")
     status = Column(String(32), nullable=False, default="created", comment="当前状态")
     winner = Column(String(16), nullable=True, comment="获胜阵营")
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True, comment="所属用户ID")
     player_ids = Column(JSON, nullable=False, comment="参与玩家ID列表")
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)

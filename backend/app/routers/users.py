@@ -10,28 +10,18 @@ from app.schemas.base import ResponseModel
 
 router = APIRouter()
 
+from app.services.rank_service import RankService
+
 @router.get("/leaderboard", response_model=ResponseModel[List[LeaderboardEntry]])
 async def get_leaderboard(
     type: Literal["total", "good", "evil"] = Query("total", description="排行榜类型"),
     limit: int = Query(10, ge=1, le=100),
-    db: Session = Depends(get_db)
+    # db: Session = Depends(get_db) # 不再需要 DB 依赖，RankService 内部处理
 ):
     """
-    获取排行榜
+    获取排行榜 (使用 Redis 缓存加速)
     """
-    query = db.query(User)
-    
-    if type == "total":
-        query = query.order_by(desc(User.total_wins))
-    elif type == "good":
-        query = query.order_by(desc(User.wins_good))
-    elif type == "evil":
-        query = query.order_by(desc(User.wins_evil))
-        
-    # 次要排序：总场次少者优先（效率高）
-    query = query.order_by(User.total_games.asc())
-    
-    users = query.limit(limit).all()
+    users = await RankService.get_leaderboard(type, limit)
     
     results = []
     for u in users:

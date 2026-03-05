@@ -34,6 +34,8 @@ from app.core.socket_manager import manager
 from app.schemas.protocol import WSMessage, WebSocketOpCode
 from app.services.ai_service import AIService
 
+from app.services.rank_service import RankService
+
 class GameService:
     @staticmethod
     def _append_event(db: Session, game_id: str, event_type: str, player_id: Optional[int], payload: dict) -> None:
@@ -180,7 +182,8 @@ class GameService:
                 id=game_id,
                 status="playing",
                 player_ids=player_ids,
-                winner=None
+                winner=None,
+                user_id=creator_id
             )
             db.add(new_game_record)
             
@@ -639,6 +642,10 @@ class GameService:
                 # 3.3 持久化成功后，才更新内存状态
                 games[game_id] = game
                 
+                # 如果游戏结束，异步更新排行榜和最近对局缓存
+                if game.phase == GamePhase.FINISHED and game.winner:
+                    asyncio.create_task(RankService.update_after_game_finish(game, game.winner))
+
             except Exception as e:
                 print(f"Failed to persist action for game {game_id}: {e}")
                 # 持久化失败，抛出异常，触发 HTTP 500 (此时内存状态未更新，保持一致)
@@ -720,11 +727,9 @@ class GameService:
         """
         db = SessionLocal()
         try:
-            # player_ids 是 JSON 数组，例如 [1, 2, 3]
-            # JSON_CONTAINS(target, candidate)
-            # 传入 str(user_id) 确保 MySQL 能正确匹配数字
+            # 优化：使用 user_id 索引字段查询，替代 JSON 扫描
             games = db.query(GameModel).filter(
-                func.json_contains(GameModel.player_ids, str(user_id))
+                GameModel.user_id == user_id
             ).order_by(GameModel.created_at.desc()).offset(skip).limit(limit).all()
             return games
         finally:

@@ -13,7 +13,7 @@ from app.models.user import User
 def override_get_current_user():
     # Construct a user object that mimics the DB model enough for dependencies
     # The actual user data doesn't matter much as long as ID matches existing data
-    return User(id=2, username="闪电杰尼", email="user2@example.com")
+    return User(id=11, username="闪电杰尼", email="user11@example.com")
 
 app.dependency_overrides[get_current_user] = override_get_current_user
 
@@ -26,7 +26,8 @@ def test_history():
         print(f"Failed to fetch history: {response.status_code} {response.text}")
         return
 
-    games = response.json()
+    resp_json = response.json()
+    games = resp_json.get("data", [])
     print(f"Found {len(games)} games in history.")
     
     if not games:
@@ -46,7 +47,8 @@ def test_history():
         print(f"Failed to fetch events: {response.status_code} {response.text}")
         return
         
-    events = response.json()
+    resp_json = response.json()
+    events = resp_json.get("data", [])
     print(f"Found {len(events)} events.")
     
     # Print first 5 events
