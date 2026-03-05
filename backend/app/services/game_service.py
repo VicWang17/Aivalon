@@ -19,6 +19,7 @@ import json
 import copy
 from app.core.redis import redis_client
 from app.core.lock import GameLock
+from celery import group
 
 # 内存存储，用于临时保存对局状态
 # key: game_id, value: GameState
@@ -152,8 +153,8 @@ class GameService:
             speaker_id=initial_leader_id # 队长开始发言
         )
         
-        # 5. 保存到内存
-        games[game_id] = initial_state
+        # 5. 保存到内存和 Redis
+        await GameService.save_game_state(game_id, initial_state)
         
         # 6. 保存到数据库 (异步线程执行，避免阻塞事件循环)
         await asyncio.to_thread(
@@ -211,46 +212,109 @@ class GameService:
             db.close()
 
     @staticmethod
+    async def save_game_state(game_id: str, game_state: GameState):
+        """
+        保存游戏状态到 Redis (用于 Worker 共享状态)
+        """
+        try:
+            # 序列化并保存，过期时间 1 小时
+            await redis_client.set(f"game:{game_id}:state", game_state.model_dump_json(), ex=3600)
+            
+            # 同时更新内存缓存 (仅当前进程有效)
+            games[game_id] = game_state
+        except Exception as e:
+            print(f"[GameService] Failed to save game state to Redis: {e}")
+
+    @staticmethod
+    async def restore_game_state(game_id: str, db: Session = None, redis_conn = None) -> Optional[GameState]:
+        """
+        恢复游戏状态 (优先从 Redis，其次 DB)
+        """
+        if not db:
+            db = SessionLocal()
+        
+        client = redis_conn or redis_client
+        
+        try:
+            # 1. 尝试从 Redis 读取
+            state_json = await client.get(f"game:{game_id}:state")
+            if state_json:
+                # 反序列化
+                state_dict = json.loads(state_json)
+                game_state = GameState(**state_dict)
+                return game_state
+            
+            # 2. 如果 Redis 没有，从 DB 读取并重建
+            game_model = db.query(GameModel).filter(GameModel.id == game_id).first()
+            if not game_model:
+                return None
+            
+            # 3. 重建 GameState
+            # 注意：这里需要根据 events 重放状态
+            # 目前简化为直接返回 None，让调用方处理 (或者在这里实现重放逻辑)
+            # TODO: 实现从 DB 重建 GameState 的逻辑
+            print(f"[GameService] Redis cache miss for {game_id}, DB rebuild not implemented yet")
+            return None
+            
+        except Exception as e:
+            print(f"[GameService] Failed to restore game state: {e}")
+            return None
+        finally:
+            if not db: # 如果是自己创建的 session，需要关闭
+                db.close()
+
+    @staticmethod
     async def _trigger_ai_logic(game_id: str):
         """
-        触发 AI 逻辑：检查当前是否有 AI 需要行动，并执行
+        触发 AI 逻辑：检查当前是否有 AI 需要行动，并投递 Celery 任务
         """
         # 避免循环导入
-        from app.services.ai_service import AIService
+        from app.tasks.ai import process_ai_turn
         
-        # 稍微延迟一下，模拟思考时间，也给前端反应时间
-        await asyncio.sleep(1.5)
-
+        # 获取当前状态 (主进程内存)
         game = games.get(game_id)
         if not game or game.phase == GamePhase.FINISHED:
             return
 
-        # 遍历玩家，找到第一个需要行动的 AI
-        # 注意：这里可能存在并发问题，但对于回合制游戏，串行执行通常是可以接受的
+        # 收集所有需要行动的 AI
+        ai_tasks = []
+        
         for player in game.players:
             if not player.is_ai:
                 continue
                 
-            action = await AIService.get_action(game, player)
-            if action:
-                try:
-                    print(f"[AI] Triggering action for {player.username} ({player.user_id}): {action['action_type']}")
-                    # 递归调用 process_action
-                    await GameService.process_action(
-                        game_id, 
-                        player.user_id, 
-                        action["action_type"], 
-                        action["payload"]
-                    )
-                    # 执行完一个动作后，状态可能改变，
-                    # process_action 会再次触发 _trigger_ai_logic
-                    # 所以这里直接返回，不再继续遍历，让下一个触发去处理下一个动作
-                    return
-                except Exception as e:
-                    print(f"[AI] Error executing action for {player.username}: {e}")
-                    # 如果出错，继续尝试下一个 AI（如果是并发场景）或者直接退出
-                    # 这里为了健壮性，选择继续下一个
-                    continue
+            # 检查该 AI 是否需要行动
+            should_act = False
+            if game.phase == GamePhase.SPEECH and game.speaker_id == player.user_id:
+                should_act = True
+            elif game.phase == GamePhase.TEAM_PROPOSAL and game.leader_id == player.user_id:
+                should_act = True
+            elif game.phase == GamePhase.VOTE and not player.has_voted:
+                should_act = True
+            elif game.phase == GamePhase.MISSION and player.user_id in game.proposed_team and not player.has_acted:
+                should_act = True
+            elif game.phase == GamePhase.ASSASSINATION and player.character == Character.ASSASSIN:
+                should_act = True
+                
+            if should_act:
+                # 投递任务到 Celery
+                print(f"[GameService] Scheduling AI task for {player.username} ({player.user_id})")
+                ai_tasks.append(process_ai_turn.s(game_id, player.user_id))
+                
+                # 如果是投票或任务阶段，所有 AI 可以并行行动
+                # 如果是发言或提名，通常是串行的
+                if game.phase not in [GamePhase.VOTE, GamePhase.MISSION]:
+                    break
+
+        if ai_tasks:
+            if len(ai_tasks) > 1:
+                # 并行执行
+                print(f"[GameService] Triggering {len(ai_tasks)} AI tasks in parallel group")
+                group(ai_tasks).apply_async()
+            else:
+                # 单个执行
+                ai_tasks[0].apply_async()
+
 
     @staticmethod
     def get_game(game_id: str) -> Optional[GameState]:
@@ -639,12 +703,30 @@ class GameService:
                     game.players
                 )
                 
-                # 3.3 持久化成功后，才更新内存状态
-                games[game_id] = game
+                # 3.3 持久化成功后，才更新内存状态和 Redis
+                await GameService.save_game_state(game_id, game)
                 
                 # 如果游戏结束，异步更新排行榜和最近对局缓存
                 if game.phase == GamePhase.FINISHED and game.winner:
-                    asyncio.create_task(RankService.update_after_game_finish(game, game.winner))
+                    # 准备传递给 Celery 的数据 (只能是 JSON 可序列化的)
+                    winner_val = game.winner.value if hasattr(game.winner, "value") else game.winner
+                    players_data = []
+                    for p in game.players:
+                        players_data.append({
+                            "user_id": p.user_id,
+                            "username": p.username,
+                            "seat_id": p.seat_id,
+                            "is_ai": p.is_ai,
+                            "character": p.character.value, # Enum 转 str
+                            "is_connected": p.is_connected,
+                            "has_voted": p.has_voted,
+                            "has_acted": p.has_acted
+                        })
+                    
+                    # 触发 Celery 任务
+                    from app.tasks.stats import process_game_result
+                    process_game_result.delay(game_id, winner_val, players_data)
+                    print(f"[GameService] Triggered stats task for game {game_id}")
 
             except Exception as e:
                 print(f"Failed to persist action for game {game_id}: {e}")
@@ -680,36 +762,8 @@ class GameService:
                     game_record.finished_at = func.now()
                     db.add(game_record)
                 
-                # --- 更新用户胜场统计 ---
-                if players and winner:
-                    user_ids = [p.user_id for p in players]
-                    users = db.query(User).filter(User.id.in_(user_ids)).all()
-                    user_map = {u.id: u for u in users}
-
-                    for p in players:
-                        user = user_map.get(p.user_id)
-                        if not user:
-                            continue
-                        
-                        user.total_games += 1
-                        
-                        # 判定阵营
-                        is_evil = p.character in EVIL_CHARACTERS
-                        
-                        # 判定胜负
-                        # winner 可能是 Enum 或 str
-                        winner_val = winner.value if hasattr(winner, "value") else winner
-                        camp_good = Camp.GOOD.value
-                        camp_evil = Camp.EVIL.value
-
-                        if winner_val == camp_good and not is_evil:
-                            user.wins_good += 1
-                            user.total_wins += 1
-                        elif winner_val == camp_evil and is_evil:
-                            user.wins_evil += 1
-                            user.total_wins += 1
-                            
-                        db.add(user)
+                # --- 更新用户胜场统计 (已移至 Celery 异步任务) ---
+                # 代码已移除，由 app.tasks.stats.process_game_result 处理
                 # ------------------------
             
             db.commit()

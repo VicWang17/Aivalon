@@ -16,6 +16,8 @@ from app.core.idempotency import IdempotencyManager
 from app.models.user import User
 from app.db.base import get_db
 from app.schemas.base import ResponseModel
+from app.core.socket_manager import manager
+from app.schemas.protocol import WSMessage, WebSocketOpCode
 
 router = APIRouter()
 
@@ -99,6 +101,59 @@ async def get_recent_games(
     """
     games = await RankService.get_recent_games(limit)
     return ResponseModel(data=games)
+
+from app.core.config import settings
+from app.models.game_enums import ActionType
+from pydantic import BaseModel
+
+class AIActionRequest(BaseModel):
+    player_id: int
+    action_type: ActionType
+    payload: dict = {}
+
+class AIThinkingRequest(BaseModel):
+    player_id: int
+
+@router.post("/{game_id}/ai_thinking", include_in_schema=False)
+async def broadcast_ai_thinking(
+    game_id: str,
+    request: AIThinkingRequest,
+    x_internal_secret: str = Header(None)
+):
+    """
+    Internal API for AI Worker to broadcast thinking state
+    """
+    if x_internal_secret != settings.SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid internal secret")
+        
+    msg = WSMessage(
+        type=WebSocketOpCode.AI_THINKING,
+        payload={"player_id": request.player_id}
+    )
+    await manager.broadcast(game_id, msg)
+    
+    return {"status": "ok"}
+
+@router.post("/{game_id}/ai_action", include_in_schema=False)
+async def process_ai_action(
+    game_id: str, 
+    request: AIActionRequest,
+    x_internal_secret: str = Header(None)
+):
+    """
+    Internal API for AI Worker to submit actions
+    """
+    if x_internal_secret != settings.SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid internal secret")
+        
+    await GameService.process_action(
+        game_id, 
+        request.player_id, 
+        request.action_type, 
+        request.payload
+    )
+    
+    return {"status": "ok"}
 
 @router.get("/history", response_model=ResponseModel[List[GameSummary]])
 async def get_my_game_history(

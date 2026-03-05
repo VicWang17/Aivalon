@@ -15,6 +15,7 @@ class WebSocketOpCode(str, Enum):
     # 服务端下行事件 (Server -> Client)
     GAME_SNAPSHOT = "game_snapshot" # 全量对局快照
     STATE_UPDATE = "state_update"   # 状态更新（增量）
+    AI_THINKING = "ai_thinking"     # AI 思考中
     ERROR = "error"                 # 错误通知
     PONG = "pong"                   # 心跳响应
 

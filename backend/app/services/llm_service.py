@@ -27,7 +27,8 @@ class LLMService:
         system_prompt: str, 
         user_prompt: str, 
         json_mode: bool = True,
-        temperature: float = 0.7
+        temperature: float = 0.7,
+        timeout: int = 30  # 新增超时参数
     ) -> Dict[str, Any]:
         """
         调用 LLM 生成响应
@@ -35,6 +36,7 @@ class LLMService:
         :param user_prompt: 用户提示词（包含当前局势、历史记录）
         :param json_mode: 是否强制 JSON 格式输出
         :param temperature: 采样温度，越高越随机（0.0 - 2.0）
+        :param timeout: 超时时间（秒）
         :return: 解析后的字典或原始文本
         """
         client = cls.get_client()
@@ -50,7 +52,8 @@ class LLMService:
                 messages=messages,
                 response_format={"type": "json_object"} if json_mode else None,
                 temperature=temperature,
-                max_tokens=1024
+                max_tokens=1024,
+                timeout=timeout # 设置超时
             )
             
             content = response.choices[0].message.content
@@ -66,5 +69,5 @@ class LLMService:
                 return {"content": content}
                 
         except Exception as e:
-            print(f"[LLM] API Call Error: {e}")
+            print(f"[LLM] API Call Error or Timeout: {e}")
             return {"error": str(e)}

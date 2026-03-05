@@ -334,24 +334,30 @@ class AIService:
                     temperature = 0.4 # More deterministic
                 else:
                     temperature = 0.6
-
+        
+        # 构建 Prompt
         system_prompt = AIService._build_system_prompt(game, player, action_str)
         user_prompt = AIService._build_user_prompt(game, player)
         
         # 打印 Prompt 日志 (Simplified)
         print(f"\n[{player.username} ({action_str})] --- AI THINKING ---")
-        # print(f"Persona: {persona.name} (Risk:{persona.risk_tolerance}, Expr:{persona.expressiveness})")
-        # print(f"Temperature: {temperature}")
-        # print(f"[System Prompt]:\n{system_prompt}")
-        # print(f"[User Prompt]:\n{user_prompt}")
         
         try:
+            # 根据阶段设置超时时间
+            # 发言阶段允许更长时间思考
+            timeout = 45 if action_str == "SPEAK" else 20
+            
             result = await LLMService.generate_response(
                 system_prompt, 
                 user_prompt, 
                 json_mode=True,
-                temperature=temperature
+                temperature=temperature,
+                timeout=timeout
             )
+            
+            if not result:
+                print(f"[AI] LLM returned None for {player.username}")
+                return None
             
             # 打印 Response 日志 (Simplified)
             print(f"[{player.username} ({action_str})] --- AI ACTION ---")
@@ -373,7 +379,7 @@ class AIService:
 
             # --- 新增：保存 AI 记忆 ---
             if "memory" in result:
-                player.ai_memory = result["memory"]
+                player.ai_memory = str(result["memory"]) # 确保是字符串
                 # 截断过长的记忆以防万一
                 if len(player.ai_memory) > 2000:
                     player.ai_memory = player.ai_memory[:2000] + "..."
@@ -384,10 +390,11 @@ class AIService:
             # LLM 返回的结构应该是 { "action_type": "...", "payload": {...} }
             # 我们需要确保 action_type 是枚举值
             
-            resp_type = result.get("action_type", "").lower()
+            resp_type = str(result.get("action_type", "")).lower()
             payload = result.get("payload", {})
             
             # 映射 action_type 字符串到 Enum
+            act_enum = None
             if resp_type == "speak":
                 act_enum = ActionType.SPEAK
             elif resp_type == "propose":

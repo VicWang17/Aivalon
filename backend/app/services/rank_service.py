@@ -20,22 +20,24 @@ MAX_RECENT_GAMES = 50
 
 class RankService:
     @staticmethod
-    async def update_after_game_finish(game_state: GameState, winner: str):
+    async def update_after_game_finish(game_state: GameState, winner: str, redis_conn=None):
         """
         游戏结束时调用：更新排行榜和最近对局缓存
         """
         # 1. 更新最近对局列表
-        await RankService._add_recent_game(game_state, winner)
+        await RankService._add_recent_game(game_state, winner, redis_conn)
         
         # 2. 更新排行榜 (全量更新或增量更新)
         # 鉴于 User 表已经更新了 total_wins，我们可以直接查询最新的 User 数据来更新 ZSET
-        await RankService._update_leaderboard_for_users(game_state)
+        await RankService._update_leaderboard_for_users(game_state, redis_conn)
 
     @staticmethod
-    async def _add_recent_game(game: GameState, winner: str):
+    async def _add_recent_game(game: GameState, winner: str, redis_conn=None):
         """
         将游戏摘要推入 Redis List
         """
+        client = redis_conn or redis_client
+        
         # 构建摘要
         summary = {
             "id": game.game_id,
@@ -48,16 +50,18 @@ class RankService:
         data = json.dumps(summary)
         
         # LPUSH + LTRIM
-        async with redis_client.pipeline() as pipe:
+        async with client.pipeline() as pipe:
             pipe.lpush(KEY_RECENT_GAMES, data)
             pipe.ltrim(KEY_RECENT_GAMES, 0, MAX_RECENT_GAMES - 1)
             await pipe.execute()
 
     @staticmethod
-    async def _update_leaderboard_for_users(game: GameState):
+    async def _update_leaderboard_for_users(game: GameState, redis_conn=None):
         """
         更新参与本局玩家的排行榜分数
         """
+        client = redis_conn or redis_client
+        
         user_ids = [p.user_id for p in game.players if not p.is_ai]
         if not user_ids:
             return
@@ -75,7 +79,7 @@ class RankService:
         if not users:
             return
 
-        async with redis_client.pipeline() as pipe:
+        async with client.pipeline() as pipe:
             for user in users:
                 # 更新总胜场
                 pipe.zadd(KEY_LEADERBOARD_TOTAL, {str(user.id): user.total_wins})

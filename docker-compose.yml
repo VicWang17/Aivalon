@@ -35,3 +35,18 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
     volumes:
       - ./data/rabbitmq:/var/lib/rabbitmq
+
+  flower:
+    image: mher/flower
+    container_name: aivalon-flower
+    restart: always
+    ports:
+      - "5555:5555"
+    environment:
+      # CELERY_BROKER_URL
+      CELERY_BROKER_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672//
+      # CELERY_RESULT_BACKEND (Optional, to see results)
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    depends_on:
+      - rabbitmq
+      - redis

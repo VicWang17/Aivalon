@@ -18,3 +18,4 @@ pytest>=8.0.0
 httpx>=0.26.0
 openai>=1.0.0
 fastapi-limiter==0.1.6
+fastapi-mail>=1.4.1
