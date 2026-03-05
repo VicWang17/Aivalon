@@ -203,6 +203,7 @@
 import { ref, onMounted, computed, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getGameState, submitAction } from '../api/game'
+import { v4 as uuidv4 } from 'uuid'
 import { useUserStore } from '../store/user'
 import type { GameState, PlayerState } from '../types/api'
 import { GamePhase, Character, MissionResult, ActionType, VoteOption } from '../types/api'
@@ -215,6 +216,8 @@ const userStore = useUserStore()
 
 const gameId = route.params.gameId as string
 const gameState = ref<GameState | null>(null)
+const loading = ref(false)
+const currentActionIdempotencyKey = ref<string>('')
 const speechInput = ref('')
 const selectedPlayerIds = ref<number[]>([])
 const chatHistoryRef = ref<HTMLElement | null>(null)
@@ -347,11 +350,17 @@ const handleSendSpeech = async (isEnd: boolean) => {
 }
 
 const handleAction = async (type: string, payload: any = {}) => {
+  if (loading.value) return
+  loading.value = true
+
+  // 生成新的幂等键
+  currentActionIdempotencyKey.value = uuidv4()
+
   try {
     const res = await submitAction(gameId, {
       action_type: type as any,
       payload
-    })
+    }, currentActionIdempotencyKey.value)
     // 兼容多种响应结构
     const responseData = (res as any).data || res
     const realData = (responseData.code === 0 && responseData.data) ? responseData.data : responseData
@@ -359,8 +368,15 @@ const handleAction = async (type: string, payload: any = {}) => {
     // 动作提交后立即刷新一次状态
   } catch (error) {
     console.error('Action failed', error)
-    const msg = (error as any).response?.data?.detail || (error as any).message || '未知错误'
-    alert('操作失败: ' + msg)
+    if ((error as any).response?.status === 409) {
+      console.warn('Duplicate request detected, refreshing state...')
+      await fetchGameState()
+    } else {
+      const msg = (error as any).response?.data?.detail || (error as any).message || '未知错误'
+      alert('操作失败: ' + msg)
+    }
+  } finally {
+    loading.value = false
   }
 }
 

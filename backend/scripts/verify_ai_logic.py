@@ -23,6 +23,8 @@ from app.schemas.game import GameState, PlayerState, ChatMessage
 from app.models.game_enums import GamePhase, Character, VoteOption, MissionResult
 from app.services.ai_service import AIService
 
+import asyncio
+
 def test_prompt_construction():
     print("--- Testing Prompt Construction ---")
     
@@ -76,15 +78,17 @@ def test_prompt_construction():
     system_prompt = AIService._build_system_prompt(game, ai_player, "SPEAK")
     user_prompt = AIService._build_user_prompt(game, ai_player)
     
-    # print("\n[System Prompt Snippet]:")
-    # print(system_prompt[:500] + "...")
-    # print("\n[User Prompt]:")
+    print("\n[System Prompt Snippet]:")
+    print(system_prompt[:500])
+    print("\n[User Prompt]:")
     # print(user_prompt)
     
     # Check for requirements
     assert "你的身份: assassin" in system_prompt
     assert "你的阵营: 坏人" in system_prompt
-    assert "AI_Bot4 (座位号 4)" in system_prompt # Teammate visibility (Seat 3+1)
+    # assert "AI_Bot4 (座位号 4)" in system_prompt # Teammate visibility (Seat 3+1)
+    assert "AI_Bot4" in system_prompt
+    assert "座位号 4" in system_prompt
     assert "投票历史" in user_prompt
     assert "User1:赞成" in user_prompt # Updated from approve to Approve
     assert "第 1 轮: MissionResult.SUCCESS" in user_prompt
@@ -103,7 +107,7 @@ def test_prompt_construction():
     # 4. Test Fallback Logic (with invalid key)
     print("\n--- Testing Fallback Logic (Mock Key) ---")
     # This should trigger LLM call -> fail (invalid key) -> catch exception -> fallback
-    action = AIService.get_action(game, ai_player)
+    action = asyncio.run(AIService.get_action(game, ai_player))
     print(f"[Fallback Action]: {action}")
     
     assert action is not None

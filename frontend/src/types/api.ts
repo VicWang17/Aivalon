@@ -52,7 +52,21 @@ export interface UserInfo {
   created_at: string;
 }
 
-// 游戏相关类型定义
+// 排行榜数据
+export interface LeaderboardEntry {
+  user_id: number;
+  username: string;
+  total_games: number;
+  wins_good: number;
+  wins_evil: number;
+  total_wins: number;
+  win_rate: number;
+}
+
+// ==========================================
+// 游戏相关枚举与类型定义
+// ==========================================
+
 export const GamePhase = {
   LEADER_SELECTION: "leader_selection",
   SPEECH: "speech",
@@ -62,31 +76,42 @@ export const GamePhase = {
   ASSASSINATION: "assassination",
   FINISHED: "finished"
 } as const;
+
 export type GamePhase = typeof GamePhase[keyof typeof GamePhase];
 
 export const Character = {
   MERLIN: "merlin",
   PERCIVAL: "percival",
   SERVANT: "servant",
-  MORGANA: "morgana",
   ASSASSIN: "assassin",
+  MORGANA: "morgana",
   MINION: "minion",
   OBERON: "oberon",
   MORDRED: "mordred"
 } as const;
+
 export type Character = typeof Character[keyof typeof Character];
 
-export const VoteOption = {
-  APPROVE: "approve",
-  REJECT: "reject"
+export const Camp = {
+  GOOD: "good",
+  EVIL: "evil"
 } as const;
-export type VoteOption = typeof VoteOption[keyof typeof VoteOption];
+
+export type Camp = typeof Camp[keyof typeof Camp];
 
 export const MissionResult = {
   SUCCESS: "success",
   FAIL: "fail"
 } as const;
+
 export type MissionResult = typeof MissionResult[keyof typeof MissionResult];
+
+export const VoteOption = {
+  APPROVE: "approve",
+  REJECT: "reject"
+} as const;
+
+export type VoteOption = typeof VoteOption[keyof typeof VoteOption];
 
 export const ActionType = {
   PROPOSE: "propose",
@@ -95,72 +120,78 @@ export const ActionType = {
   ASSASSINATE: "assassinate",
   SPEAK: "speak"
 } as const;
+
 export type ActionType = typeof ActionType[keyof typeof ActionType];
 
-export interface GameSummary {
-  id: string;
-  status: string;
-  winner: string | null;
-  player_ids: number[];
-  created_at: string;
-  finished_at: string | null;
-}
-
-export interface GameEvent {
-  id: number;
-  game_id: string;
-  seq: number;
-  event_type: string;
-  player_id: number | null;
-  payload: any;
-  created_at: string;
-}
-
+// 玩家状态
 export interface PlayerState {
   user_id: number;
   username: string;
   seat_id: number;
-  character?: Character;
-  is_alive: boolean;
-  is_seen_as_evil: boolean;
-  is_seen_as_merlin: boolean;
+  is_ai: boolean;
+  character?: Character | string;
+  camp?: Camp | string;
   has_voted: boolean;
   has_acted: boolean;
+  is_alive?: boolean;
 }
 
-export interface ChatMessage {
-  user_id: number;
-  username: string;
-  content: string;
-  timestamp: number;
-}
-
+// 游戏状态
 export interface GameState {
-  game_id: string;
+  id: string;
   phase: GamePhase;
-  phase_start_time: number;
   round: number;
-  vote_track: number;
-  leader_id?: number;
+  leader_id: number;
   speaker_id?: number;
-  speech_history: ChatMessage[];
-  proposed_team: number[];
-  votes: Record<number, VoteOption>;
   players: PlayerState[];
+  proposed_team: number[];
   mission_results: MissionResult[];
-  winner?: string;
+  vote_track: number;
+  vote_history: any[];
+  winner?: Camp | string;
+  created_at: string;
+  votes?: Record<string, VoteOption>;
 }
 
+// 创建游戏请求
 export interface CreateGameRequest {
   player_ids: number[];
 }
 
+// 创建游戏响应
 export interface CreateGameResponse {
   game_id: string;
   initial_state: GameState;
 }
 
+// 游戏动作请求
 export interface GameActionRequest {
   action_type: ActionType;
-  payload: Record<string, any>;
+  payload: any;
+}
+
+// 游戏历史摘要
+export interface GameSummary {
+  id: string;
+  status: string;
+  winner: string;
+  created_at: string;
+  finished_at?: string;
+  players: {
+    user_id: number;
+    username: string;
+    character: string;
+    is_winner: boolean;
+  }[];
+}
+
+// 游戏事件
+export interface GameEvent {
+  id?: number;
+  game_id: string;
+  seq: number;
+  event_type: ActionType;
+  player_id: number;
+  payload: any;
+  created_at?: string;
 }

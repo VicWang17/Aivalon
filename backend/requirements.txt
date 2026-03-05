@@ -17,3 +17,4 @@ cryptography>=42.0.0
 pytest>=8.0.0
 httpx>=0.26.0
 openai>=1.0.0
+fastapi-limiter==0.1.6

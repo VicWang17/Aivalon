@@ -1,5 +1,6 @@
 # 这个文件是认证相关的 API 路由处理，包含用户注册和登录接口。
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi_limiter.depends import RateLimiter
 from sqlalchemy.orm import Session
 from pydantic import EmailStr, BaseModel
 from app.db.base import get_db
@@ -18,7 +19,7 @@ router = APIRouter()
 class EmailSchema(BaseModel):
     email: EmailStr
 
-@router.post("/send-code", response_model=ResponseModel)
+@router.post("/send-code", response_model=ResponseModel, dependencies=[Depends(RateLimiter(times=1, seconds=60))])
 async def send_code(
     email_data: EmailSchema,
     background_tasks: BackgroundTasks,
@@ -107,7 +108,7 @@ async def register(
         data=db_user
     )
 
-@router.post("/login", response_model=ResponseModel[Token])
+@router.post("/login", response_model=ResponseModel[Token], dependencies=[Depends(RateLimiter(times=5, seconds=60))])
 def login(user_in: UserLogin, db: Session = Depends(get_db)):
     """
     用户登录接口（返回 JWT Token）

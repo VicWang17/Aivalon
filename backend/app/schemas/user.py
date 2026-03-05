@@ -26,3 +26,18 @@ class UserResponse(UserBase):
 
     # Pydantic V2 配置：允许从 ORM 对象读取数据
     model_config = ConfigDict(from_attributes=True)
+
+# 排行榜条目
+class LeaderboardEntry(BaseModel):
+    id: int = Field(alias="user_id") # Map id to user_id or just use id
+    username: str
+    total_games: int
+    wins_good: int
+    wins_evil: int
+    total_wins: int
+    win_rate: float = 0.0
+    
+    # Custom validator or just computed property in service layer?
+    # Pydantic allows validation/computation.
+    
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)

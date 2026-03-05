@@ -12,3 +12,9 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Statistics
+    total_games = Column(Integer, default=0)
+    wins_good = Column(Integer, default=0)  # 蓝方胜场
+    wins_evil = Column(Integer, default=0)  # 红方胜场
+    total_wins = Column(Integer, default=0) # 总胜场

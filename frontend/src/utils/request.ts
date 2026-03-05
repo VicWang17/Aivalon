@@ -5,7 +5,7 @@ import { getToken } from './auth'
 // 创建 axios 实例
 const service = axios.create({
   baseURL: '/api/v1', // 配合 Vite 代理或 Nginx
-  timeout: 5000 // 请求超时时间
+  timeout: 15000 // 请求超时时间 (15s)
 })
 
 // request 拦截器
@@ -56,6 +56,18 @@ service.interceptors.response.use(
       // 如果当前不在登录页，则跳转
       if (!window.location.pathname.includes('/login')) {
         window.location.href = '/login'
+      }
+    }
+    // 处理 429 Too Many Requests
+    if (error.response && error.response.status === 429) {
+      const retryAfter = error.response.headers['retry-after'] || '60'
+      const msg = error.response.data?.detail || `操作过于频繁，请在 ${retryAfter} 秒后重试`
+      // 这里可以接入全局消息提示组件，暂时先 reject 出去让业务层处理
+      // 也可以修改 error message 让上层显示更友好
+      error.message = msg
+      // 也可以直接在这里修改 error.response.data.detail 确保上层拿到的是友好信息
+      if (error.response.data) {
+        error.response.data.detail = msg
       }
     }
     return Promise.reject(error)

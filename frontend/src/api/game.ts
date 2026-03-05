@@ -1,5 +1,6 @@
 // 这个文件封装了游戏相关的 API 请求
 import request from '../utils/request'
+import { v4 as uuidv4 } from 'uuid'
 import type { 
   ApiResponse,
   CreateGameRequest, 
@@ -28,11 +29,18 @@ export function getGameState(gameId: string) {
 }
 
 // 提交动作
-export function submitAction(gameId: string, data: GameActionRequest) {
+// idempotentKey 可选，如果不传则自动生成一个新的
+export function submitAction(gameId: string, data: GameActionRequest, idempotentKey?: string) {
+  // 生成幂等键 (UUID v4)
+  const key = idempotentKey || uuidv4()
+  
   return request<any, ApiResponse<GameState>>({
     url: `/games/${gameId}/action`,
     method: 'post',
-    data
+    data,
+    headers: {
+      'x-idempotency-key': key
+    }
   })
 }
 

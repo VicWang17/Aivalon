@@ -13,7 +13,7 @@ from app.core.ai_personas import get_persona_by_seat
 
 class AIService:
     @staticmethod
-    def get_action(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
+    async def get_action(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
         """
         获取 AI 玩家的下一步动作
         """
@@ -23,15 +23,15 @@ class AIService:
         try:
             # 根据不同阶段决策
             if game.phase == GamePhase.SPEECH:
-                return AIService._handle_speech(game, player)
+                return await AIService._handle_speech(game, player)
             elif game.phase == GamePhase.TEAM_PROPOSAL:
-                return AIService._handle_propose(game, player)
+                return await AIService._handle_propose(game, player)
             elif game.phase == GamePhase.VOTE:
-                return AIService._handle_vote(game, player)
+                return await AIService._handle_vote(game, player)
             elif game.phase == GamePhase.MISSION:
-                return AIService._handle_mission(game, player)
+                return await AIService._handle_mission(game, player)
             elif game.phase == GamePhase.ASSASSINATION:
-                return AIService._handle_assassination(game, player)
+                return await AIService._handle_assassination(game, player)
         except Exception as e:
             print(f"[AI] Error in get_action for {player.username}: {e}")
             # 如果出错，尝试回退策略
@@ -313,7 +313,7 @@ class AIService:
     # =========================================================================
 
     @staticmethod
-    def _call_llm(game: GameState, player: PlayerState, action_str: str, temperature: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    async def _call_llm(game: GameState, player: PlayerState, action_str: str, temperature: Optional[float] = None) -> Optional[Dict[str, Any]]:
         persona = get_persona_by_seat(player.seat_id)
 
         # Dynamic Temperature Adjustment
@@ -346,7 +346,7 @@ class AIService:
         # print(f"[User Prompt]:\n{user_prompt}")
         
         try:
-            result = LLMService.generate_response(
+            result = await LLMService.generate_response(
                 system_prompt, 
                 user_prompt, 
                 json_mode=True,
@@ -411,52 +411,52 @@ class AIService:
             return None
 
     @staticmethod
-    def _handle_speech(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
+    async def _handle_speech(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
         if game.speaker_id != player.user_id:
             return None
         
         # 发言需要更多创造性，温度由 Persona 决定
-        action = AIService._call_llm(game, player, "SPEAK")
+        action = await AIService._call_llm(game, player, "SPEAK")
         if action:
             return action
         return AIService._fallback_speech(game, player)
 
     @staticmethod
-    def _handle_propose(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
+    async def _handle_propose(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
         if game.leader_id != player.user_id:
             return None
             
-        action = AIService._call_llm(game, player, "PROPOSE")
+        action = await AIService._call_llm(game, player, "PROPOSE")
         if action:
             return action
         return AIService._fallback_propose(game, player)
 
     @staticmethod
-    def _handle_vote(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
+    async def _handle_vote(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
         if player.has_voted:
             return None
             
-        action = AIService._call_llm(game, player, "VOTE")
+        action = await AIService._call_llm(game, player, "VOTE")
         if action:
             return action
         return AIService._fallback_vote(game, player)
 
     @staticmethod
-    def _handle_mission(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
+    async def _handle_mission(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
         if player.user_id not in game.proposed_team or player.has_acted:
             return None
             
-        action = AIService._call_llm(game, player, "MISSION")
+        action = await AIService._call_llm(game, player, "MISSION")
         if action:
             return action
         return AIService._fallback_mission(game, player)
 
     @staticmethod
-    def _handle_assassination(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
+    async def _handle_assassination(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
         if player.character != Character.ASSASSIN:
             return None
             
-        action = AIService._call_llm(game, player, "ASSASSINATE")
+        action = await AIService._call_llm(game, player, "ASSASSINATE")
         if action:
             return action
         return AIService._fallback_assassination(game, player)

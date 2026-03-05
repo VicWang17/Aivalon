@@ -22,7 +22,7 @@
     <!-- 核心内容区 -->
     <main class="hero-section flex-center">
       <div class="hero-content text-center">
-        <h1 class="main-title gradient-text">阿瓦隆</h1>
+        <h1 class="main-title gradient-text">AI阿瓦隆</h1>
         <p class="subtitle text-secondary">正义与邪恶的终极较量</p>
         
         <div class="action-area mt-8">
@@ -34,6 +34,11 @@
           <router-link to="/history" class="btn-ghost btn-large mt-4">
             <span class="icon">📜</span>
             <span>查看对局历史</span>
+          </router-link>
+          
+          <router-link to="/leaderboard" class="btn-ghost btn-large mt-4">
+            <span class="icon">🏆</span>
+            <span>胜场排行榜</span>
           </router-link>
         </div>
       </div>
@@ -84,8 +89,8 @@ const handleStartGame = async () => {
     console.log('Create Game Response:', res)
 
     // 调试：打印响应结构
-    // alert(`Debug: ${JSON.stringify(res)}`)
-
+    console.log('Create Game Raw Response:', res)
+    
     // 兼容多种响应结构：
     // 1. res 是 AxiosResponse，数据在 res.data
     // 2. res 直接是数据对象（拦截器处理后）
@@ -95,6 +100,7 @@ const handleStartGame = async () => {
     
     // 安全地获取响应体
     const responseBody = (res && (res as any).data) ? (res as any).data : res
+    console.log('Processed Response Body:', responseBody)
     
     // 尝试从不同层级提取 game_id
     if (responseBody) {
@@ -113,6 +119,8 @@ const handleStartGame = async () => {
       }
     }
     
+    console.log('Extracted Game ID:', gameId)
+    
     if (gameId) {
       console.log('Redirecting to game:', gameId)
       router.push(`/game/${gameId}`).catch(err => {
@@ -124,9 +132,10 @@ const handleStartGame = async () => {
       alert(`创建对局失败：无法获取 game_id。响应数据: ${JSON.stringify(res)}`)
       throw new Error('No game_id returned from server')
     }
-  } catch (error) {
+  } catch (error: any) {
     console.error('Create game failed', error)
-    alert('创建对局失败，请稍后重试')
+    const errorMsg = error.response?.data?.detail || error.message || '未知错误'
+    alert(`创建对局失败: ${errorMsg}`)
   }
 }
 </script>
@@ -136,7 +145,7 @@ const handleStartGame = async () => {
   min-height: 100vh;
   position: relative;
   overflow: hidden;
-  background: var(--bg-main);
+  background: var(--color-bg-main);
 }
 
 /* 顶部导航 */
@@ -261,13 +270,25 @@ const handleStartGame = async () => {
   left: 0;
   width: 100%;
   height: 100%;
+  /* 兜底背景色（深紫色渐变），防止图片加载失败时一片黑 */
+  background: linear-gradient(135deg, #0f1016 0%, #1e1b4b 100%);
+  z-index: 1;
+}
+
+/* 如果图片加载成功，覆盖渐变 */
+.bg-overlay::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
   /* Unsplash 中世纪/奇幻/神秘风格背景图 */
   background-image: url('https://images.unsplash.com/photo-1519074069444-1ba4fff66d16?q=80&w=2070&auto=format&fit=crop');
   background-size: cover;
   background-position: center;
   /* 初始滤镜 */
   filter: brightness(0.5) blur(1px) sepia(0.2);
-  z-index: 1;
   /* 增强动画：缩短周期，增加变化幅度 */
   animation: breathe 15s infinite alternate ease-in-out;
 }
@@ -283,6 +304,7 @@ const handleStartGame = async () => {
   /* 调整遮罩透明度，让背景更透亮一点 */
   background: radial-gradient(circle at center, rgba(15, 16, 22, 0.2) 0%, rgba(15, 16, 22, 0.8) 100%);
   pointer-events: none;
+  z-index: 2;
 }
 
 @keyframes breathe {
@@ -295,5 +317,17 @@ const handleStartGame = async () => {
     /* 放大时略微变亮且模糊减少，模拟聚焦感 */
     filter: brightness(0.7) blur(0px) sepia(0.4);
   }
+}
+
+.action-area {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+/* 移除原有的 mt-4，统一用 gap 控制间距 */
+.action-area .mt-4 {
+  margin-top: 0;
 }
 </style>

@@ -14,7 +14,7 @@ from app.models.game_enums import GamePhase, Character, VoteOption, MissionResul
 from app.services.ai_service import AIService
 from app.core.config import settings
 
-def test_ai_speech():
+async def test_ai_speech():
     print(f"Testing with API Key: {settings.DEEPSEEK_API_KEY[:5]}***" if settings.DEEPSEEK_API_KEY else "No API Key found")
     
     # 1. Mock Players
@@ -45,10 +45,10 @@ def test_ai_speech():
     ai_player = players[1] # AI_Bot2 (Assassin)
     print(f"\n--- Testing AI Speech for {ai_player.username} ({ai_player.character}) ---")
     
-    action = AIService.get_action(game, ai_player)
+    action = await AIService.get_action(game, ai_player)
     
     print("\n[Result Action]:")
     print(action)
 
 if __name__ == "__main__":
-    test_ai_speech()
+    asyncio.run(test_ai_speech())

@@ -23,7 +23,8 @@ class GameEvent(Base):
     game_id = Column(String(36), ForeignKey("games.id", ondelete="CASCADE"), nullable=False, index=True)
     seq = Column(Integer, nullable=False, comment="事件序号，从1开始")
     event_type = Column(String(32), nullable=False, comment="事件类型 (ActionType)")
-    player_id = Column(Integer, ForeignKey("users.id"), nullable=True, comment="触发玩家ID")
+    # 移除外键约束，允许记录非注册用户（如 AI）的ID
+    player_id = Column(Integer, nullable=True, comment="触发玩家ID")
     payload = Column(JSON, nullable=True, comment="事件详情数据")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

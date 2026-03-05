@@ -119,8 +119,14 @@ const handleSendCode = async () => {
     successMessage.value = '验证码已发送！'
     errorMessage.value = ''
   } catch (error: any) {
-    errorMessage.value = error.response?.data?.detail || '发送验证码失败'
+    // 优先展示后端返回的错误信息（包括限流提示）
+    errorMessage.value = error.response?.data?.detail || error.message || '发送验证码失败'
     successMessage.value = ''
+    
+    // 如果是 429 错误，自动进入冷却倒计时（体验优化）
+    if (error.response?.status === 429) {
+      startCooldown()
+    }
   }
 }
 

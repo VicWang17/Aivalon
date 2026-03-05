@@ -84,11 +84,11 @@ const handleLogin = async () => {
         // 如果是 Validation Error 数组，取第一个错误显示
         errorMessage.value = detail.map((e: any) => e.msg).join('; ')
       } else {
-        // 如果是普通错误信息
+        // 如果是普通错误信息（包括 429 限流信息）
         errorMessage.value = detail
       }
     } else {
-      errorMessage.value = '登录失败，请重试'
+      errorMessage.value = error.message || '登录失败，请重试'
     }
   } finally {
     loading.value = false

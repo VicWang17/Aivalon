@@ -2,12 +2,16 @@
 这个文件定义了对局相关的路由接口。
 """
 import random
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List, Annotated
+from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi_limiter.depends import RateLimiter
 from sqlalchemy.orm import Session
+from redis.asyncio import Redis
 from app.schemas.game import GameCreateRequest, GameCreateResponse, GameState, GameActionRequest, GameSummary, GameEventSchema
 from app.services.game_service import GameService
 from app.core.deps import get_current_user
+from app.core.redis import get_redis
+from app.core.idempotency import IdempotencyManager
 from app.models.user import User
 from app.db.base import get_db
 from app.schemas.base import ResponseModel
@@ -26,7 +30,7 @@ AI_NAMES = [
     "朱莉", "凯特", "莉莉", "莫莉", "诺拉", "佩妮", "瑞秋", "萨拉", "蒂娜", "温蒂"
 ]
 
-@router.post("/", response_model=ResponseModel[GameCreateResponse])
+@router.post("/", response_model=ResponseModel[GameCreateResponse], dependencies=[Depends(RateLimiter(times=10, seconds=3600))])
 async def create_game(
     request: GameCreateRequest,
     current_user: User = Depends(get_current_user),
@@ -143,31 +147,43 @@ async def get_game_state(
     
     return ResponseModel(data=player_view)
 
-@router.post("/{game_id}/action", response_model=ResponseModel[GameState])
+@router.post("/{game_id}/action", response_model=ResponseModel[GameState], dependencies=[Depends(RateLimiter(times=1, seconds=1))])
 async def submit_action(
     game_id: str,
     action: GameActionRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    x_idempotency_key: Annotated[str | None, Header()] = None,
+    redis: Redis = Depends(get_redis)
 ):
     """
     提交玩家动作（统一入口）。
     根据 action_type 和 payload 执行相应的业务逻辑。
+    支持幂等性校验：通过 Header 'x-idempotency-key' 传递唯一请求ID。
     """
-    # 调用 Service 处理动作
-    # Service 层会负责：
-    # 1. 校验动作是否合法（规则引擎）
-    # 2. 更新游戏状态（状态机）
-    # 3. 返回更新后的全局状态（Service 返回的是全局状态）
     
-    updated_state = await GameService.process_action(
-        game_id=game_id,
-        user_id=current_user.id,
-        action_type=action.action_type,
-        payload=action.payload
-    )
-    
-    # 返回给前端时，同样需要进行视角脱敏
-    # 这样前端操作完后能立即拿到最新的、符合自己视角的快照
-    player_view = GameService.get_player_view(updated_state, current_user.id)
+    # 封装核心处理逻辑
+    async def _process():
+        # 调用 Service 处理动作
+        # Service 层会负责：
+        # 1. 校验动作是否合法（规则引擎）
+        # 2. 更新游戏状态（状态机）
+        # 3. 返回更新后的全局状态（Service 返回的是全局状态）
+        updated_state = await GameService.process_action(
+            game_id=game_id,
+            user_id=current_user.id,
+            action_type=action.action_type,
+            payload=action.payload
+        )
+        
+        # 返回给前端时，同样需要进行视角脱敏
+        # 这样前端操作完后能立即拿到最新的、符合自己视角的快照
+        return GameService.get_player_view(updated_state, current_user.id)
+
+    # 幂等性控制
+    if x_idempotency_key:
+        async with IdempotencyManager(redis, x_idempotency_key, current_user.id):
+            player_view = await _process()
+    else:
+        player_view = await _process()
     
     return ResponseModel(data=player_view)
