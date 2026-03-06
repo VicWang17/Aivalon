@@ -88,10 +88,10 @@
 - [x] 投票/任务并发优化（利用 Celery Group 并行触发所有 AI 决策，显著提升速度）
 - [x] AI "思考中" (Typing) 状态广播（优化用户体验）
 - [x] AI 超时兜底（worker 超时或失败时走保底策略）
-- [ ] 控制并发与背压（AI 队列 worker 并发上限）
+- [X] 控制并发与背压（AI 队列 worker 并发上限，prefetch=1, rate_limit=60/m）
 
 ### 4.3 可靠性（面试亮点）
-- [ ] Outbox 表（MySQL）落地并实现消息转发器
+- [X] Outbox 表（MySQL）落地并实现消息转发器
 - [ ] 消费端幂等（按 event_id/task_id 去重）
 - [ ] 失败重试与告警策略（死信队列 + 可观测指标）
 

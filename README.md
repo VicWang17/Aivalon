@@ -46,9 +46,20 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 # 安装依赖
 pip install -r requirements.txt
 
-# 启动 API 服务 (热更新模式)
+# 1. 启动 API 服务 (热更新模式)
 # 默认运行在 http://localhost:8000
 uvicorn app.main:app --reload
+
+# 2. 启动 Celery Worker (异步任务)
+# 负责处理 AI 思考、排行榜更新、邮件发送等耗时任务
+# -A: 指定应用入口
+# --loglevel: 日志级别
+# --concurrency: 并发数 (建议根据 CPU 核数调整)
+celery -A app.core.celery_app worker --loglevel=info --concurrency=4
+
+# 3. 启动 Outbox Relay (消息转发器)
+# 负责将数据库中的事件转发到消息队列 (可靠性保障)
+python -m app.core.outbox_relay
 ```
 
 #### 3. 启动前端 (Frontend)
@@ -62,6 +73,30 @@ npm install
 # 默认运行在 http://localhost:5173
 npm run dev
 ```
+
+## ⚙️ 启动全栈 (开发模式)
+
+### 方式一：一键启动 (推荐)
+
+我们提供了一个脚本 `dev_runner.py` 来同时启动 API、Celery 和 Relay 服务。
+
+1. **Terminal 1 (Infrastructure)**: `docker-compose up`
+2. **Terminal 2 (Backend All-in-One)**: 
+   ```bash
+   cd backend
+   python dev_runner.py
+   ```
+3. **Terminal 3 (Frontend)**: `npm run dev`
+
+### 方式二：手动分步启动
+
+如果需要单独调试某个服务，可以在不同终端分别启动：
+
+1. **Terminal 1 (Infrastructure)**: `docker-compose up`
+2. **Terminal 2 (API)**: `uvicorn app.main:app --reload`
+3. **Terminal 3 (Celery)**: `celery -A app.core.celery_app worker --loglevel=info`
+4. **Terminal 4 (Relay)**: `python -m app.core.outbox_relay`
+5. **Terminal 5 (Frontend)**: `npm run dev`
 
 ## ⚙️ 环境配置 (.env)
 

@@ -12,7 +12,7 @@ import asyncio
 import json
 import requests
 
-@celery_app.task(bind=True, queue="ai_queue", max_retries=3)
+@celery_app.task(bind=True, queue="ai_queue", max_retries=3, rate_limit='60/m')
 def process_ai_turn(self, game_id: str, player_id: int):
     """
     处理 AI 玩家的回合

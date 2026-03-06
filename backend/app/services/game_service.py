@@ -11,6 +11,7 @@ from fastapi import HTTPException, status
 from app.schemas.game import GameState, PlayerState, ChatMessage
 from app.models.game_enums import GamePhase, Character, Camp, ActionType, VoteOption, MissionResult
 from app.models.game import Game as GameModel, GameEvent as GameEventModel
+from app.models.outbox import OutboxEvent
 from app.models.user import User
 from app.db.base import SessionLocal
 from sqlalchemy.orm import Session
@@ -42,6 +43,7 @@ class GameService:
     def _append_event(db: Session, game_id: str, event_type: str, player_id: Optional[int], payload: dict) -> None:
         """
         向 game_events 表追加事件，并自动处理 seq (带乐观锁重试)
+        同时写入 Outbox 表以保证消息可靠投递
         """
         from sqlalchemy.exc import IntegrityError
         
@@ -69,6 +71,18 @@ class GameService:
                         payload=payload
                     )
                     db.add(new_event)
+
+                    # 3. 同时写入 Outbox (事务性发件箱)
+                    # 确保事件通知与数据库写入原子一致
+                    outbox_event = OutboxEvent(
+                        aggregate_type="game",
+                        aggregate_id=game_id,
+                        event_type=event_type,
+                        payload=payload,
+                        status="pending"
+                    )
+                    db.add(outbox_event)
+
                     db.flush() # 立即触发唯一约束检查
                 
                 # 成功则跳出循环

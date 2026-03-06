@@ -19,6 +19,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../"))
 from app.db.base import Base
 from app.models.user import User  # 导入 User 模型以便 Alembic 识别
 from app.models.game import Game, GameEvent # 导入 Game 模型以便 Alembic 识别
+from app.models.outbox import OutboxEvent # 导入 Outbox 模型以便 Alembic 识别
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
