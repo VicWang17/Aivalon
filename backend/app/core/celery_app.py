@@ -1,9 +1,10 @@
 from celery import Celery
 from kombu import Queue, Exchange
+from celery.schedules import crontab
 
 from app.core.config import settings
 
-celery_app = Celery("aivalon", broker=settings.CELERY_BROKER_URL, include=["app.tasks.test_tasks", "app.tasks.stats", "app.tasks.ai"])
+celery_app = Celery("aivalon", broker=settings.CELERY_BROKER_URL, include=["app.tasks.test_tasks", "app.tasks.stats", "app.tasks.ai", "app.tasks.monitor"])
 
 # 配置 Result Backend
 celery_app.conf.result_backend = settings.CELERY_RESULT_BACKEND
@@ -64,6 +65,14 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,  # 防止 Worker 一次性领取过多耗时任务（公平调度）
     worker_concurrency=8,  # 默认并发数，确保至少能同时处理一个 8 人局的 AI (7 个)
 )
+
+# 定时任务配置 (Beat Schedule)
+celery_app.conf.beat_schedule = {
+    "monitor-dlq-every-5-min": {
+        "task": "app.tasks.monitor.monitor_dead_letter_queue",
+        "schedule": 300.0, # 5分钟一次
+    },
+}
 
 # 自动发现任务模块
 celery_app.autodiscover_tasks(["app.tasks"])

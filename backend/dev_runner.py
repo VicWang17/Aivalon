@@ -109,6 +109,14 @@ def main():
     ))
     threads.append(t3)
 
+    # 4. Celery Beat
+    t4 = threading.Thread(target=run_process, args=(
+        [sys.executable, "-m", "celery", "-A", "app.core.celery_app", "beat", "--loglevel=info"],
+        "Beat",
+        '\033[95m' # MAGENTA
+    ))
+    threads.append(t4)
+
     log("Runner", "Starting backend services...", GREEN)
     
     # 启动所有线程
