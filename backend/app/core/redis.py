@@ -1,13 +1,23 @@
 # 这个文件是 Redis 数据库连接的工具类，用于缓存验证码、会话信息和实现限流功能。
 import redis.asyncio as redis
+import redis as redis_sync
 from app.core.config import settings
 
-# 创建 Redis 连接池
+# 创建异步 Redis 连接池
 redis_pool = redis.ConnectionPool(
     host=settings.REDIS_HOST,
     port=settings.REDIS_PORT,
     password=settings.REDIS_PASSWORD,
     decode_responses=True,  # 自动解码为字符串
+    encoding="utf-8"
+)
+
+# 创建同步 Redis 连接池 (用于 Celery 等同步场景)
+redis_sync_pool = redis_sync.ConnectionPool(
+    host=settings.REDIS_HOST,
+    port=settings.REDIS_PORT,
+    password=settings.REDIS_PASSWORD,
+    decode_responses=True,
     encoding="utf-8"
 )
 

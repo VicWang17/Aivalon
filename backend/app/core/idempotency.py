@@ -37,3 +37,42 @@ class IdempotencyManager:
         else:
             # 业务执行成功，标记为 DONE 并延长过期时间
             await self.redis.set(self.redis_key, "DONE", ex=self.expire)
+
+class CeleryIdempotencyManager:
+    """
+    Celery 任务幂等性管理器 (同步 Context Manager)
+    用法:
+        with CeleryIdempotencyManager(key, expire=86400) as success:
+            if not success:
+                print(f"Task {key} already processed.")
+                return
+            # 执行任务逻辑
+    """
+    def __init__(self, key: str, expire: int = 86400):
+        # 延迟导入以避免循环引用
+        from app.core.redis import redis_sync, redis_sync_pool
+        self.redis = redis_sync.Redis(connection_pool=redis_sync_pool)
+        self.redis_key = f"celery:idempotency:{key}"
+        self.expire = expire
+        self.is_new = False
+
+    def __enter__(self):
+        # SETNX
+        self.is_new = self.redis.set(self.redis_key, "PROCESSING", ex=self.expire, nx=True)
+        return self.is_new
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if not self.is_new:
+            # 如果一开始就不是新的，这里不需要做什么
+            self.redis.close()
+            return
+
+        if exc_type:
+            # 如果发生异常（任务失败），删除 Key，允许重试
+            self.redis.delete(self.redis_key)
+        else:
+            # 任务执行成功，标记为 DONE 并延长过期时间
+            self.redis.set(self.redis_key, "DONE", ex=self.expire)
+        
+        self.redis.close()
+
