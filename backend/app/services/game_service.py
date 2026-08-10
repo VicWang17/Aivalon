@@ -19,7 +19,7 @@ from sqlalchemy import func
 import json
 import copy
 from app.core.redis import redis_client
-from app.core.lock import GameLock
+from app.core.room_actor import actor_manager
 from celery import group
 
 # 内存存储，用于临时保存对局状态
@@ -399,363 +399,369 @@ class GameService:
     @staticmethod
     async def process_action(game_id: str, user_id: int, action_type: ActionType, payload: dict) -> GameState:
         """
-        处理玩家动作（统一入口）
-        使用 Redis 分布式锁确保并发安全
+        处理玩家动作（统一入口）：路由到房间 Actor 串行处理。
+        单写者模型：同一房间的动作在 Actor 队列中逐个执行，替代原 Redis 分布式锁。
         """
-        # 使用分布式锁，防止并发修改状态
-        async with GameLock(redis_client, game_id):
-            game_in_memory = games.get(game_id)
-            if not game_in_memory:
-                raise HTTPException(status_code=404, detail="Game not found")
-            
-            # 使用深拷贝进行修改，避免直接修改内存中的对象导致（在持久化失败时的）脏数据
-            # 注意：Pydantic V2 推荐使用 model_copy(deep=True) 或 copy.deepcopy
-            game = copy.deepcopy(game_in_memory)
+        actor = actor_manager.get_or_create(game_id, GameService._apply_action)
+        return await actor.submit(user_id, action_type, payload)
 
-            # 1. 规则校验
-            from app.core.game_rules import GameRuleValidator
-            try:
-                GameRuleValidator.validate_action(game, user_id, action_type, payload)
-            except ValueError as e:
-                 raise HTTPException(status_code=400, detail=str(e))
+    @staticmethod
+    async def _apply_action(game_id: str, user_id: int, action_type: ActionType, payload: dict) -> GameState:
+        """
+        动作处理主体，只在房间 Actor 内被串行调用（不要绕过 Actor 直接调用）。
+        """
+        game_in_memory = games.get(game_id)
+        if not game_in_memory:
+            raise HTTPException(status_code=404, detail="Game not found")
+        
+        # 使用深拷贝进行修改，避免直接修改内存中的对象导致（在持久化失败时的）脏数据
+        # 注意：Pydantic V2 推荐使用 model_copy(deep=True) 或 copy.deepcopy
+        game = copy.deepcopy(game_in_memory)
+
+        # 1. 规则校验
+        from app.core.game_rules import GameRuleValidator
+        try:
+            GameRuleValidator.validate_action(game, user_id, action_type, payload)
+        except ValueError as e:
+             raise HTTPException(status_code=400, detail=str(e))
     
-            # 2. 执行动作（状态机流转）
-            # 准备事件日志数据
-            event_payload = payload.copy()
+        # 2. 执行动作（状态机流转）
+        # 准备事件日志数据
+        event_payload = payload.copy()
+        
+        # 找到当前操作的玩家
+        player = next((p for p in game.players if p.user_id == user_id), None)
+        if not player:
+             raise HTTPException(status_code=403, detail="Player not in game")
+    
+        # --- PROPOSE (提名) ---
+        if action_type == ActionType.PROPOSE:
+            target_ids = payload.get("target_ids", [])
+            game.proposed_team = target_ids
+            # 进入投票阶段
+            game.phase = GamePhase.VOTE
+            game.phase_start_time = time.time()
+            # 重置投票状态
+            game.votes = {}
+            for p in game.players:
+                p.has_voted = False
+
+        # --- VOTE (投票) ---
+        elif action_type == ActionType.VOTE:
+            option = payload.get("option")
+            game.votes[user_id] = option
+            player.has_voted = True
+        
+            # 检查是否所有人都投了
+            if all(p.has_voted for p in game.players):
+                # 结算投票结果
+                approve_count = sum(1 for v in game.votes.values() if v == VoteOption.APPROVE)
             
-            # 找到当前操作的玩家
-            player = next((p for p in game.players if p.user_id == user_id), None)
-            if not player:
-                 raise HTTPException(status_code=403, detail="Player not in game")
-    
-            # --- PROPOSE (提名) ---
-            if action_type == ActionType.PROPOSE:
-                target_ids = payload.get("target_ids", [])
-                game.proposed_team = target_ids
-                # 进入投票阶段
-                game.phase = GamePhase.VOTE
-                game.phase_start_time = time.time()
-                # 重置投票状态
-                game.votes = {}
+                # 记录投票结果到事件日志
+                event_payload["vote_result"] = {
+                    "approved": approve_count,
+                    "rejected": len(game.players) - approve_count,
+                    "details": game.votes.copy() # 公开每个人投了什么
+                }
+
+                # --- 记录到 GameState.vote_history ---
+                game.vote_history.append({
+                    "round": game.round,
+                    "vote_track": game.vote_track,
+                    "leader_id": game.leader_id,
+                    "team": game.proposed_team.copy(),
+                    "votes": game.votes.copy(),
+                    "result": "approve" if approve_count > len(game.players) / 2 else "reject"
+                })
+                # -------------------------------------
+
+                # --- 新增：将投票结果写入会议记录 ---
+                vote_details_str = []
                 for p in game.players:
-                    p.has_voted = False
-
-            # --- VOTE (投票) ---
-            elif action_type == ActionType.VOTE:
-                option = payload.get("option")
-                game.votes[user_id] = option
-                player.has_voted = True
+                    v_str = "同意" if game.votes.get(p.user_id) == VoteOption.APPROVE else "反对"
+                    vote_details_str.append(f"{p.username}: {v_str}")
             
-                # 检查是否所有人都投了
-                if all(p.has_voted for p in game.players):
-                    # 结算投票结果
-                    approve_count = sum(1 for v in game.votes.values() if v == VoteOption.APPROVE)
-                
-                    # 记录投票结果到事件日志
-                    event_payload["vote_result"] = {
-                        "approved": approve_count,
-                        "rejected": len(game.players) - approve_count,
-                        "details": game.votes.copy() # 公开每个人投了什么
-                    }
-
-                    # --- 记录到 GameState.vote_history ---
-                    game.vote_history.append({
-                        "round": game.round,
-                        "vote_track": game.vote_track,
-                        "leader_id": game.leader_id,
-                        "team": game.proposed_team.copy(),
-                        "votes": game.votes.copy(),
-                        "result": "approve" if approve_count > len(game.players) / 2 else "reject"
-                    })
-                    # -------------------------------------
-
-                    # --- 新增：将投票结果写入会议记录 ---
-                    vote_details_str = []
-                    for p in game.players:
-                        v_str = "同意" if game.votes.get(p.user_id) == VoteOption.APPROVE else "反对"
-                        vote_details_str.append(f"{p.username}: {v_str}")
-                
-                    pass_str = "通过" if approve_count > len(game.players) / 2 else "不通过"
-                    vote_summary = f"【投票结果】{pass_str} (同意: {approve_count}, 反对: {len(game.players) - approve_count})\n" + "  ".join(vote_details_str)
-                
-                    game.speech_history.append(ChatMessage(
-                        user_id=0,
-                        username="系统",
-                        content=vote_summary,
-                        timestamp=time.time()
-                    ))
-                    # ----------------------------------
-
-                    if approve_count > len(game.players) / 2:
-                        # 投票通过 -> 进入任务阶段
-                        game.phase = GamePhase.MISSION
-                        game.vote_track = 0 # 重置投票失败计数
-                        # 重置行动状态（用于记录谁执行了任务）
-                        for p in game.players:
-                            p.has_acted = False
-                    else:
-                        # 投票失败
-                        game.vote_track += 1
-                        if game.vote_track >= 5:
-                            # 连续5次失败 -> 坏人直接获胜
-                            game.phase = GamePhase.FINISHED
-                            game.winner = Camp.EVIL
-                        else:
-                            # 换下一个队长
-                            # 找到当前队长索引
-                            current_leader_idx = next(i for i, p in enumerate(game.players) if p.user_id == game.leader_id)
-                            next_leader_idx = (current_leader_idx + 1) % len(game.players)
-                            game.leader_id = game.players[next_leader_idx].user_id
-                            # 回到发言阶段
-                            game.phase = GamePhase.SPEECH
-                            game.speaker_id = game.leader_id
-                            game.proposed_team = []
-                            # 重置发言状态
-                            for p in game.players:
-                                p.has_acted = False
-                
-                    game.phase_start_time = time.time()
-
-            # --- MISSION (执行任务) ---
-            elif action_type == ActionType.MISSION:
-                result = payload.get("result")
-                # 只有在队伍里的人才能提交
-                if not hasattr(game, "pending_mission_results"):
-                    game.pending_mission_results = [] # 这是一个 hack，最好加到 Schema 里
+                pass_str = "通过" if approve_count > len(game.players) / 2 else "不通过"
+                vote_summary = f"【投票结果】{pass_str} (同意: {approve_count}, 反对: {len(game.players) - approve_count})\n" + "  ".join(vote_details_str)
             
-                game.pending_mission_results.append(result)
-                player.has_acted = True
-            
-                # 任务结果是私密的，事件日志里不能记录具体是谁投了什么
-                # 这里需要注意：event_payload 可能会被前端看到，所以不能把 result 放进去
-                # 或者我们在写入数据库时，对于 mission 动作，要把 result 抹去？
-                # 实际上，action_type=MISSION 的事件是“某人提交了任务”，但不包含结果
-                # 真正的结果要在所有人都提交后，生成一个新的事件 "MISSION_RESULT"
-                if "result" in event_payload:
-                    del event_payload["result"] # 保护隐私
-            
-                # 检查是否所有队员都提交了
-                team_size = len(game.proposed_team)
-                if len(game.pending_mission_results) >= team_size:
-                    # 结算任务
-                    # 需要先把结果打乱，虽然我们这里只有 count，但也模拟一下流程
-                    mission_results_shuffled = game.pending_mission_results.copy()
-                    random.shuffle(mission_results_shuffled)
-                
-                    fail_count = mission_results_shuffled.count(MissionResult.FAIL)
-                
-                    # 判断失败条件
-                    # 8人局：3-4-4-5-5
-                    # 第4轮（5人）需要2个fail才失败，其他都是1个
-                    is_failed = False
-                    if game.round == 4:
-                        if fail_count >= 2:
-                            is_failed = True
-                    else:
-                        if fail_count >= 1:
-                            is_failed = True
-                
-                    final_result = MissionResult.FAIL if is_failed else MissionResult.SUCCESS
-                    game.mission_results.append(final_result)
-                
-                    # --- 新增：记录详细任务历史 ---
-                    game.mission_history.append({
-                        "round": game.round,
-                        "team": game.proposed_team.copy(),
-                        "result": final_result,
-                        "fail_count": fail_count
-                    })
-                    # ---------------------------
-
-                    # 触发一个额外的事件：任务结果揭晓
-                    # 这个事件不由玩家触发，而是系统触发
-                    # 我们稍后在写入数据库时处理
-                    event_payload["mission_outcome"] = {
-                        "round": game.round,
-                        "fails": fail_count,
-                        "result": final_result
-                    }
-
-                    # --- 新增：将任务结果写入会议记录 ---
-                    result_zh = "成功" if final_result == MissionResult.SUCCESS else "失败"
-                    mission_summary = f"【第 {game.round} 轮任务结果】{result_zh}\n出现 {fail_count} 张反对票"
-                
-                    game.speech_history.append(ChatMessage(
-                        user_id=0,
-                        username="系统",
-                        content=mission_summary,
-                        timestamp=time.time()
-                    ))
-                    # ----------------------------------
-
-                    # 清理临时状态
-                    game.pending_mission_results = []
-                    game.proposed_team = []
-                
-                    # 检查游戏是否结束
-                    fails_total = game.mission_results.count(MissionResult.FAIL)
-                    success_total = game.mission_results.count(MissionResult.SUCCESS)
-                
-                    if fails_total >= 3:
-                        # 坏人 3 胜
-                        game.phase = GamePhase.FINISHED
-                        game.winner = Camp.EVIL
-                    elif success_total >= 3:
-                        # 好人 3 胜 -> 进入刺杀阶段
-                        game.phase = GamePhase.ASSASSINATION
-                    else:
-                        # 继续下一轮
-                        game.round += 1
-                        # 换下一个队长
-                        current_leader_idx = next(i for i, p in enumerate(game.players) if p.user_id == game.leader_id)
-                        next_leader_idx = (current_leader_idx + 1) % len(game.players)
-                        game.leader_id = game.players[next_leader_idx].user_id
-                    
-                        game.phase = GamePhase.SPEECH
-                        game.speaker_id = game.leader_id
-                        # 重置发言状态
-                        for p in game.players:
-                            p.has_acted = False
-                
-                    game.phase_start_time = time.time()
-
-            # --- ASSASSINATE (刺杀) ---
-            elif action_type == ActionType.ASSASSINATE:
-                target_id = payload.get("target_id")
-                target = next((p for p in game.players if p.user_id == target_id), None)
-            
-                # 记录刺杀结果
-                assassin_name = player.username
-                target_name = target.username if target else "Unknown"
-                result_msg = ""
-
-                if target and target.character == Character.MERLIN:
-                    game.winner = Camp.EVIL
-                    result_msg = f"刺客 {assassin_name} 刺杀了 {target_name} (梅林)！坏人胜利！"
-                else:
-                    game.winner = Camp.GOOD
-                    target_char = target.character.value if target else "Unknown"
-                    result_msg = f"刺客 {assassin_name} 刺杀了 {target_name} ({target_char})。刺杀失败，好人胜利！"
-
                 game.speech_history.append(ChatMessage(
                     user_id=0,
                     username="系统",
-                    content=result_msg,
+                    content=vote_summary,
                     timestamp=time.time()
                 ))
+                # ----------------------------------
 
-                game.phase = GamePhase.FINISHED
-                game.phase_start_time = time.time()
-
-            # --- SPEAK (发言) ---
-            elif action_type == ActionType.SPEAK:
-                content = payload.get("content")
-                is_end = payload.get("is_end", False)
-            
-                # 校验权限
-                if game.speaker_id != user_id:
-                     raise HTTPException(status_code=403, detail="Not your turn to speak")
-
-                # 1. 记录发言
-                if content:
-                    # 检查上一条消息是否是同一个人的发言（且不是系统消息）
-                    # 如果是，则合并内容
-                    if game.speech_history and game.speech_history[-1].user_id == user_id:
-                        game.speech_history[-1].content += "\n" + content
-                        # 更新时间戳为最新
-                        game.speech_history[-1].timestamp = time.time()
+                if approve_count > len(game.players) / 2:
+                    # 投票通过 -> 进入任务阶段
+                    game.phase = GamePhase.MISSION
+                    game.vote_track = 0 # 重置投票失败计数
+                    # 重置行动状态（用于记录谁执行了任务）
+                    for p in game.players:
+                        p.has_acted = False
+                else:
+                    # 投票失败
+                    game.vote_track += 1
+                    if game.vote_track >= 5:
+                        # 连续5次失败 -> 坏人直接获胜
+                        game.phase = GamePhase.FINISHED
+                        game.winner = Camp.EVIL
                     else:
-                        msg = ChatMessage(
-                            user_id=user_id,
-                            username=player.username,
-                            content=content,
-                            timestamp=time.time()
-                        )
-                        game.speech_history.append(msg)
-
-                # 2. 处理结束发言
-                if is_end:
-                    player.has_acted = True # 标记已完成发言
-                
-                    # 寻找下一个未发言的玩家
-                    next_speaker_id = None
-                    current_seat = player.seat_id
-                    num_players = len(game.players)
-                
-                    # 从下一位开始找
-                    for i in range(1, num_players + 1):
-                        idx = (current_seat + i) % num_players
-                        p = game.players[idx]
-                        if not p.has_acted:
-                            next_speaker_id = p.user_id
-                            break
-                
-                    if next_speaker_id:
-                        game.speaker_id = next_speaker_id
-                        # TODO: AI Trigger
-                    else:
-                        # 所有人都发言完毕，进入提名阶段
-                        game.phase = GamePhase.TEAM_PROPOSAL
-                        game.speaker_id = None
-                        # 重置 acted 状态
+                        # 换下一个队长
+                        # 找到当前队长索引
+                        current_leader_idx = next(i for i, p in enumerate(game.players) if p.user_id == game.leader_id)
+                        next_leader_idx = (current_leader_idx + 1) % len(game.players)
+                        game.leader_id = game.players[next_leader_idx].user_id
+                        # 回到发言阶段
+                        game.phase = GamePhase.SPEECH
+                        game.speaker_id = game.leader_id
+                        game.proposed_team = []
+                        # 重置发言状态
                         for p in game.players:
                             p.has_acted = False
-                
-                    game.phase_start_time = time.time()
+            
+                game.phase_start_time = time.time()
+
+        # --- MISSION (执行任务) ---
+        elif action_type == ActionType.MISSION:
+            result = payload.get("result")
+            # 只有在队伍里的人才能提交
+            if not hasattr(game, "pending_mission_results"):
+                game.pending_mission_results = [] # 这是一个 hack，最好加到 Schema 里
         
-            # 3. 持久化事件与状态更新
-            try:
-                # 异步线程执行数据库操作
-                await asyncio.to_thread(
-                    GameService._persist_action,
-                    game_id,
-                    action_type,
-                    user_id,
-                    event_payload,
-                    game.phase,
-                    game.winner if game.phase == GamePhase.FINISHED else None,
-                    game.players
-                )
+            game.pending_mission_results.append(result)
+            player.has_acted = True
+        
+            # 任务结果是私密的，事件日志里不能记录具体是谁投了什么
+            # 这里需要注意：event_payload 可能会被前端看到，所以不能把 result 放进去
+            # 或者我们在写入数据库时，对于 mission 动作，要把 result 抹去？
+            # 实际上，action_type=MISSION 的事件是“某人提交了任务”，但不包含结果
+            # 真正的结果要在所有人都提交后，生成一个新的事件 "MISSION_RESULT"
+            if "result" in event_payload:
+                del event_payload["result"] # 保护隐私
+        
+            # 检查是否所有队员都提交了
+            team_size = len(game.proposed_team)
+            if len(game.pending_mission_results) >= team_size:
+                # 结算任务
+                # 需要先把结果打乱，虽然我们这里只有 count，但也模拟一下流程
+                mission_results_shuffled = game.pending_mission_results.copy()
+                random.shuffle(mission_results_shuffled)
+            
+                fail_count = mission_results_shuffled.count(MissionResult.FAIL)
+            
+                # 判断失败条件
+                # 8人局：3-4-4-5-5
+                # 第4轮（5人）需要2个fail才失败，其他都是1个
+                is_failed = False
+                if game.round == 4:
+                    if fail_count >= 2:
+                        is_failed = True
+                else:
+                    if fail_count >= 1:
+                        is_failed = True
+            
+                final_result = MissionResult.FAIL if is_failed else MissionResult.SUCCESS
+                game.mission_results.append(final_result)
+            
+                # --- 新增：记录详细任务历史 ---
+                game.mission_history.append({
+                    "round": game.round,
+                    "team": game.proposed_team.copy(),
+                    "result": final_result,
+                    "fail_count": fail_count
+                })
+                # ---------------------------
+
+                # 触发一个额外的事件：任务结果揭晓
+                # 这个事件不由玩家触发，而是系统触发
+                # 我们稍后在写入数据库时处理
+                event_payload["mission_outcome"] = {
+                    "round": game.round,
+                    "fails": fail_count,
+                    "result": final_result
+                }
+
+                # --- 新增：将任务结果写入会议记录 ---
+                result_zh = "成功" if final_result == MissionResult.SUCCESS else "失败"
+                mission_summary = f"【第 {game.round} 轮任务结果】{result_zh}\n出现 {fail_count} 张反对票"
+            
+                game.speech_history.append(ChatMessage(
+                    user_id=0,
+                    username="系统",
+                    content=mission_summary,
+                    timestamp=time.time()
+                ))
+                # ----------------------------------
+
+                # 清理临时状态
+                game.pending_mission_results = []
+                game.proposed_team = []
+            
+                # 检查游戏是否结束
+                fails_total = game.mission_results.count(MissionResult.FAIL)
+                success_total = game.mission_results.count(MissionResult.SUCCESS)
+            
+                if fails_total >= 3:
+                    # 坏人 3 胜
+                    game.phase = GamePhase.FINISHED
+                    game.winner = Camp.EVIL
+                elif success_total >= 3:
+                    # 好人 3 胜 -> 进入刺杀阶段
+                    game.phase = GamePhase.ASSASSINATION
+                else:
+                    # 继续下一轮
+                    game.round += 1
+                    # 换下一个队长
+                    current_leader_idx = next(i for i, p in enumerate(game.players) if p.user_id == game.leader_id)
+                    next_leader_idx = (current_leader_idx + 1) % len(game.players)
+                    game.leader_id = game.players[next_leader_idx].user_id
                 
-                # 3.3 持久化成功后，才更新内存状态和 Redis
-                await GameService.save_game_state(game_id, game)
-                
-                # 如果游戏结束，异步更新排行榜和最近对局缓存
-                if game.phase == GamePhase.FINISHED and game.winner:
-                    # 准备传递给 Celery 的数据 (只能是 JSON 可序列化的)
-                    winner_val = game.winner.value if hasattr(game.winner, "value") else game.winner
-                    players_data = []
+                    game.phase = GamePhase.SPEECH
+                    game.speaker_id = game.leader_id
+                    # 重置发言状态
                     for p in game.players:
-                        players_data.append({
-                            "user_id": p.user_id,
-                            "username": p.username,
-                            "seat_id": p.seat_id,
-                            "is_ai": p.is_ai,
-                            "character": p.character.value, # Enum 转 str
-                            "is_connected": p.is_connected,
-                            "has_voted": p.has_voted,
-                            "has_acted": p.has_acted
-                        })
-                    
-                    # 触发 Celery 任务
-                    from app.tasks.stats import process_game_result
-                    process_game_result.delay(game_id, winner_val, players_data)
-                    print(f"[GameService] Triggered stats task for game {game_id}")
-
-            except Exception as e:
-                print(f"Failed to persist action for game {game_id}: {e}")
-                # 持久化失败，抛出异常，触发 HTTP 500 (此时内存状态未更新，保持一致)
-                raise HTTPException(status_code=500, detail=f"Failed to process action: {str(e)}")
-
-            # 4. 广播更新 (在锁内广播，确保顺序)
-            await manager.broadcast_game_update(game_id, game)
+                        p.has_acted = False
             
-            # 5. 触发 AI 逻辑 (异步)
-            # 注意：create_task 是非阻塞的，AI 逻辑会在新的 Task 中运行
-            # 新的 Task 再次调用 process_action 时会重新获取锁，不会死锁
-            asyncio.create_task(GameService._trigger_ai_logic(game_id))
+                game.phase_start_time = time.time()
+
+        # --- ASSASSINATE (刺杀) ---
+        elif action_type == ActionType.ASSASSINATE:
+            target_id = payload.get("target_id")
+            target = next((p for p in game.players if p.user_id == target_id), None)
+        
+            # 记录刺杀结果
+            assassin_name = player.username
+            target_name = target.username if target else "Unknown"
+            result_msg = ""
+
+            if target and target.character == Character.MERLIN:
+                game.winner = Camp.EVIL
+                result_msg = f"刺客 {assassin_name} 刺杀了 {target_name} (梅林)！坏人胜利！"
+            else:
+                game.winner = Camp.GOOD
+                target_char = target.character.value if target else "Unknown"
+                result_msg = f"刺客 {assassin_name} 刺杀了 {target_name} ({target_char})。刺杀失败，好人胜利！"
+
+            game.speech_history.append(ChatMessage(
+                user_id=0,
+                username="系统",
+                content=result_msg,
+                timestamp=time.time()
+            ))
+
+            game.phase = GamePhase.FINISHED
+            game.phase_start_time = time.time()
+
+        # --- SPEAK (发言) ---
+        elif action_type == ActionType.SPEAK:
+            content = payload.get("content")
+            is_end = payload.get("is_end", False)
+        
+            # 校验权限
+            if game.speaker_id != user_id:
+                 raise HTTPException(status_code=403, detail="Not your turn to speak")
+
+            # 1. 记录发言
+            if content:
+                # 检查上一条消息是否是同一个人的发言（且不是系统消息）
+                # 如果是，则合并内容
+                if game.speech_history and game.speech_history[-1].user_id == user_id:
+                    game.speech_history[-1].content += "\n" + content
+                    # 更新时间戳为最新
+                    game.speech_history[-1].timestamp = time.time()
+                else:
+                    msg = ChatMessage(
+                        user_id=user_id,
+                        username=player.username,
+                        content=content,
+                        timestamp=time.time()
+                    )
+                    game.speech_history.append(msg)
+
+            # 2. 处理结束发言
+            if is_end:
+                player.has_acted = True # 标记已完成发言
             
-            return game
+                # 寻找下一个未发言的玩家
+                next_speaker_id = None
+                current_seat = player.seat_id
+                num_players = len(game.players)
+            
+                # 从下一位开始找
+                for i in range(1, num_players + 1):
+                    idx = (current_seat + i) % num_players
+                    p = game.players[idx]
+                    if not p.has_acted:
+                        next_speaker_id = p.user_id
+                        break
+            
+                if next_speaker_id:
+                    game.speaker_id = next_speaker_id
+                    # TODO: AI Trigger
+                else:
+                    # 所有人都发言完毕，进入提名阶段
+                    game.phase = GamePhase.TEAM_PROPOSAL
+                    game.speaker_id = None
+                    # 重置 acted 状态
+                    for p in game.players:
+                        p.has_acted = False
+            
+                game.phase_start_time = time.time()
+        
+        # 3. 持久化事件与状态更新
+        try:
+            # 异步线程执行数据库操作
+            await asyncio.to_thread(
+                GameService._persist_action,
+                game_id,
+                action_type,
+                user_id,
+                event_payload,
+                game.phase,
+                game.winner if game.phase == GamePhase.FINISHED else None,
+                game.players
+            )
+            
+            # 3.3 持久化成功后，才更新内存状态和 Redis
+            await GameService.save_game_state(game_id, game)
+            
+            # 如果游戏结束，异步更新排行榜和最近对局缓存
+            if game.phase == GamePhase.FINISHED and game.winner:
+                # 准备传递给 Celery 的数据 (只能是 JSON 可序列化的)
+                winner_val = game.winner.value if hasattr(game.winner, "value") else game.winner
+                players_data = []
+                for p in game.players:
+                    players_data.append({
+                        "user_id": p.user_id,
+                        "username": p.username,
+                        "seat_id": p.seat_id,
+                        "is_ai": p.is_ai,
+                        "character": p.character.value, # Enum 转 str
+                        "is_connected": p.is_connected,
+                        "has_voted": p.has_voted,
+                        "has_acted": p.has_acted
+                    })
+                
+                # 触发 Celery 任务
+                from app.tasks.stats import process_game_result
+                process_game_result.delay(game_id, winner_val, players_data)
+                print(f"[GameService] Triggered stats task for game {game_id}")
+
+        except Exception as e:
+            print(f"Failed to persist action for game {game_id}: {e}")
+            # 持久化失败，抛出异常，触发 HTTP 500 (此时内存状态未更新，保持一致)
+            raise HTTPException(status_code=500, detail=f"Failed to process action: {str(e)}")
+
+        # 4. 广播更新 (在锁内广播，确保顺序)
+        await manager.broadcast_game_update(game_id, game)
+        
+        # 5. 触发 AI 逻辑 (异步)
+        # 注意：create_task 是非阻塞的，AI 逻辑会在新的 Task 中运行
+        # 新的 Task 再次调用 process_action 时会重新获取锁，不会死锁
+        asyncio.create_task(GameService._trigger_ai_logic(game_id))
+        
+        return game
 
     @staticmethod
     def _persist_action(game_id: str, action_type: str, user_id: int, event_payload: dict, phase: str, winner: Optional[str], players: Optional[List[PlayerState]] = None):
