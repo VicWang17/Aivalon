@@ -58,6 +58,28 @@ locust -f ../bench/locust_s3.py --headless -u 1000 -r 100 -t 40s --host ws://loc
 
 > 注意：WS 鉴权曾按连接独占 DB 连接池（修复见 DEVLOG 006），梯度压测前先确认后端是最新代码。
 
+## S4 突发流量场景
+
+阶梯负载：60s 基线（50 用户）→ 60s 十倍突发（500 用户瞬时打满）→ 60s 回落观察恢复。
+
+```bash
+locust -f ../bench/locust_s4.py --headless --host http://localhost:8000
+# 用户数由 LoadTestShape 控制，不需要 -u/-r
+```
+
+## S5 热点场景
+
+单房间 WS 旁观（4/5 用户）+ 热榜集中读（1/5 用户）叠加：
+
+```bash
+python ../bench/s3_broadcast_source.py --game-id s5-hot-room --rate 5 &
+S3_GAME_ID=s5-hot-room locust -f ../bench/locust_s5.py --headless -u 500 -r 50 -t 60s --host http://localhost:8000
+```
+
+> 场景间要留恢复间隔：S4 突发结束后系统有积压要消化，立刻接着跑 S5 会继承未恢复的
+> 状态（实测首跑 S5 70% 失败，间隔重跑 11.5 万请求零失败）——"突发后多久恢复"本身就是
+> S4 要观察的指标之一，别把它当成场景 bug。
+
 ## 设计要点
 
 - **登录接口不进压测场景**：`/auth/login` 有 5次/分/IP 限流，压它测量的是限流器而非系统容量；压测 token 由 `prepare_users.py` 直接签发

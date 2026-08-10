@@ -38,7 +38,9 @@ class S3SpectatorUser(User):
         self._connect()
 
     def _connect(self):
-        url = f"{self.host}/api/v1/ws/games/{GAME_ID}?token={self.token}"
+        # host 可能是 http:// 或 ws://（混合场景里 HttpUser 需要 http），统一转成 ws 协议
+        ws_host = self.host.replace("http://", "ws://").replace("https://", "wss://")
+        url = f"{ws_host}/api/v1/ws/games/{GAME_ID}?token={self.token}"
         start = time.perf_counter()
         try:
             self.ws = websocket.create_connection(url, timeout=10)
