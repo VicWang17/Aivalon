@@ -4,9 +4,9 @@
 import random
 from typing import List, Annotated
 from fastapi import APIRouter, Depends, HTTPException, status, Header
-from fastapi_limiter.depends import RateLimiter
 from sqlalchemy.orm import Session
 from redis.asyncio import Redis
+from app.core.rate_limit import create_game_rate_limit, action_rate_limit
 from app.schemas.game import GameCreateRequest, GameCreateResponse, GameState, GameActionRequest, GameSummary, GameEventSchema, RecentGameSummary
 from app.services.game_service import GameService
 from app.services.rank_service import RankService
@@ -33,7 +33,7 @@ AI_NAMES = [
     "朱莉", "凯特", "莉莉", "莫莉", "诺拉", "佩妮", "瑞秋", "萨拉", "蒂娜", "温蒂"
 ]
 
-@router.post("/", response_model=ResponseModel[GameCreateResponse], dependencies=[Depends(RateLimiter(times=10, seconds=3600))])
+@router.post("/", response_model=ResponseModel[GameCreateResponse], dependencies=[Depends(create_game_rate_limit())])
 async def create_game(
     request: GameCreateRequest,
     current_user: User = Depends(get_current_user),
@@ -213,7 +213,7 @@ async def get_game_state(
     
     return ResponseModel(data=player_view)
 
-@router.post("/{game_id}/action", response_model=ResponseModel[GameState], dependencies=[Depends(RateLimiter(times=1, seconds=1))])
+@router.post("/{game_id}/action", response_model=ResponseModel[GameState], dependencies=[Depends(action_rate_limit())])
 async def submit_action(
     game_id: str,
     action: GameActionRequest,

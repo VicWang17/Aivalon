@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     RABBITMQ_HOST: str = "localhost"
     RABBITMQ_PORT: int = 5672
 
+    # Rate Limit（v2 改为按用户维度统计，见 app/core/rate_limit.py；压测时可用环境变量调高阈值）
+    RATE_LIMIT_CREATE_GAME_TIMES: int = 10
+    RATE_LIMIT_CREATE_GAME_SECONDS: int = 3600
+    RATE_LIMIT_ACTION_TIMES: int = 1
+    RATE_LIMIT_ACTION_SECONDS: int = 1
+
+    # AI
+    AI_USE_LLM: bool = True  # False 时 AI 直接走规则引擎：压测专用，避免 LLM 延迟与成本污染数据
+
     @property
     def CELERY_BROKER_URL(self) -> str:
         return f"amqp://{self.RABBITMQ_DEFAULT_USER}:{self.RABBITMQ_DEFAULT_PASS}@{self.RABBITMQ_HOST}:{self.RABBITMQ_PORT}//"

@@ -10,6 +10,7 @@ from app.models.game_enums import GamePhase, ActionType, VoteOption, MissionResu
 from app.core.game_rules import GameRuleValidator
 from app.services.llm_service import LLMService
 from app.core.ai_personas import get_persona_by_seat
+from app.core.config import settings
 
 class AIService:
     @staticmethod
@@ -19,6 +20,10 @@ class AIService:
         """
         if not player.is_ai:
             return None
+
+        # 压测模式：直接走规则引擎，不调 LLM（避免延迟与成本污染压测数据）
+        if not settings.AI_USE_LLM:
+            return AIService._get_fallback_action(game, player)
 
         try:
             # 根据不同阶段决策

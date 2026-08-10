@@ -24,6 +24,24 @@ locust -f ../bench/locustfile.py --headless -u 50 -r 10 -t 60s --host http://loc
 # 3. Web UI 模式（调试用）：去掉 --headless，浏览器打开 http://localhost:8089
 ```
 
+## S2 对局主链路场景
+
+S2 每个虚拟用户驱动一个完整对局（真人动作由驱动器轮询快照提交，AI 由 Celery worker 驱动）。
+
+```bash
+# 0. 额外前提：Celery worker 与 outbox relay 在线；且必须用压测配置启动后端：
+cd backend && source venv/bin/activate
+export AI_USE_LLM=false                    # AI 走规则引擎，避免 LLM 延迟/成本污染数据
+export RATE_LIMIT_ACTION_TIMES=100         # 调高按用户限流阈值（默认 1次/秒 是真人手速语义）
+export RATE_LIMIT_CREATE_GAME_TIMES=10000  # 同上（默认 10局/小时）
+uvicorn app.main:app --port 8000 &
+celery -A app.core.celery_app worker --loglevel=warning &
+python -m app.core.outbox_relay &
+
+# 1. 运行 S2（10 个并发房间，持续 120s）
+locust -f ../bench/locust_s2.py --headless -u 10 -r 2 -t 120s --host http://localhost:8000
+```
+
 ## 设计要点
 
 - **登录接口不进压测场景**：`/auth/login` 有 5次/分/IP 限流，压它测量的是限流器而非系统容量；压测 token 由 `prepare_users.py` 直接签发
