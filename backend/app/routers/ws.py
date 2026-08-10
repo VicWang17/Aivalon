@@ -2,11 +2,10 @@
 这个文件定义了 WebSocket 路由，处理实时对局连接、鉴权与消息转发。
 """
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query, status, HTTPException
-from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 
 from app.core.socket_manager import manager
-from app.core.deps import get_db
+from app.db.base import SessionLocal
 from app.core.config import settings
 from app.models.user import User
 from app.schemas.protocol import WSMessage, WebSocketOpCode
@@ -15,12 +14,16 @@ import json
 router = APIRouter()
 
 async def get_ws_user(
-    token: str = Query(...),
-    db: Session = Depends(get_db)
+    token: str = Query(...)
 ) -> User:
     """
     WebSocket 鉴权依赖项
     在 WebSocket 握手阶段验证 Token。如果验证失败，抛出 HTTP 异常拒绝连接。
+
+    注意：这里不用 get_db 依赖注入，而是手动管理短生命周期 Session。
+    原因：FastAPI 的 yield 依赖在 WS 端点上的生命周期 = 整条连接，而 Session 查询后
+    事务保持打开会一直占用连接池连接——N 条长连接 = N 个 DB 连接被独占，
+    默认池（5+10）在第 16 条连接时就耗尽，整个服务被拖死（见 DEVLOG 006）。
     """
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -31,7 +34,11 @@ async def get_ws_user(
     except (JWTError, ValueError):
          raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Could not validate credentials")
 
-    user = db.query(User).filter(User.id == user_id).first()
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+    finally:
+        db.close()  # 握手鉴权是一次性查询，用完立即归还连接
     if not user:
          raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
     return user

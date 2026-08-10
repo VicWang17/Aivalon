@@ -2,6 +2,7 @@
 这个文件定义了对局相关的路由接口。
 """
 import random
+import time
 from typing import List, Annotated
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
@@ -128,7 +129,8 @@ async def broadcast_ai_thinking(
         
     msg = WSMessage(
         type=WebSocketOpCode.AI_THINKING,
-        payload={"player_id": request.player_id}
+        # ts 为广播发出时间戳：客户端据此计算端到端广播延迟（S3 压测与 E 组广播延迟埋点共用）
+        payload={"player_id": request.player_id, "ts": time.time()}
     )
     await manager.broadcast(game_id, msg)
     

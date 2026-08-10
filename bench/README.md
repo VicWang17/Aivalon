@@ -42,6 +42,22 @@ python -m app.core.outbox_relay &
 locust -f ../bench/locust_s2.py --headless -u 10 -r 2 -t 120s --host http://localhost:8000
 ```
 
+## S3 长连接场景
+
+S3 每个虚拟用户 = 一条 WS 长连接，聚众到同一房间（热点场景），广播源独立控制发送速率。
+
+```bash
+# 终端 1：广播源（每秒 5 条广播，走真实 manager.broadcast 链路）
+python ../bench/s3_broadcast_source.py --game-id s3-hot-room --rate 5
+
+# 终端 2：连接压测（1000 连接，每秒新建 100 条，持续 40s）
+locust -f ../bench/locust_s3.py --headless -u 1000 -r 100 -t 40s --host ws://localhost:8000
+```
+
+测量口径：`WS connect` = 握手+鉴权耗时（连接上限证据）；`WS recv` = 广播端到端延迟（服务端 ts → 客户端收到）。
+
+> 注意：WS 鉴权曾按连接独占 DB 连接池（修复见 DEVLOG 006），梯度压测前先确认后端是最新代码。
+
 ## 设计要点
 
 - **登录接口不进压测场景**：`/auth/login` 有 5次/分/IP 限流，压它测量的是限流器而非系统容量；压测 token 由 `prepare_users.py` 直接签发
