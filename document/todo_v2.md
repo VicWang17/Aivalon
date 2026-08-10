@@ -14,8 +14,8 @@
 - [ ] 对局指标：活跃房间数、事件写入速率、action 处理耗时
 - [ ] AI 指标：队列积压深度、LLM 调用耗时/失败率/重试率
 - [ ] 基础设施指标：Redis / MySQL 操作耗时、连接池水位
-- [ ] docker-compose 增加 Prometheus + Grafana 服务
-- [ ] Grafana 面板：压测总览仪表盘（QPS/延迟/房间/队列一屏看完）
+- [x] docker-compose 增加 Prometheus + Grafana 服务
+- [x] Grafana 面板：压测总览仪表盘（QPS/延迟/房间/队列一屏看完）
 
 ### A.2 日志（最小集）
 - [ ] 全链路 trace_id 透传（压测排障刚需）

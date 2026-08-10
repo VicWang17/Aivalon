@@ -50,3 +50,31 @@ services:
     depends_on:
       - rabbitmq
       - redis
+
+  prometheus:
+    image: prom/prometheus:latest  # 使用本地已有镜像，Docker Hub 拉取超时；锁定版本待网络环境允许时回填
+    container_name: aivalon-prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    extra_hosts:
+      # Linux 下容器访问宿主机需要显式映射；macOS Docker Desktop 自带此域名
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:latest  # 同上，本地已有镜像
+    container_name: aivalon-grafana
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - prometheus

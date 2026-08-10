@@ -3,6 +3,34 @@
 > 规则（见 AGENTS.md §6）：凡开发过程中遇到的非平凡问题——报错、环境坑、压测结果与预期不符、选型纠结——都记录在此。
 > 每条按「现象 → 排查 → 根因 → 解决 → 经验」五段式，注明日期。这是技术复盘长文和面试问答的一手素材库。
 
+## 概念速查（面试向 · 随时补充）
+
+> 非踩坑类：开发中遇到"不懂但必须懂"的概念，用问答式笔记沉淀在此，每条标注关联代码/配置位置。
+
+### C01 Prometheus 是什么（2026-08-10 · A 组）
+
+- **一句话**：专门存"监控数字"的时序数据库 + 采集器，大厂监控体系事实标准
+- **核心模式是 pull**：它不是等你上报，而是每隔 15s 主动访问 `/metrics` 把当前所有数字抓走存起来（对比：MySQL 是你往里写）
+- **数据结构叫时间序列**：指标名 + 一组 label = 一条随时间变化的曲线。例：`http_requests_total{handler="/health", method="GET", status="2xx"}` 就是"该接口 GET 2xx 的累计请求数"这条曲线。有了曲线就能算增速 = QPS
+- **分工**：Prometheus 存数据和告警，Grafana 负责画图（Grafana 只读不存）
+- **关联代码**：`backend/app/main.py` 的 `Instrumentator().expose(app)` 就是被拉的 `/metrics`
+
+### C02 label 基数爆炸（2026-08-10 · A 组）
+
+- **label**：指标上的维度标签，如 `{handler="/health", method="GET"}`
+- **基数 = 取值个数**；**每种 label 取值组合 = 一条独立时间序列**，都要占内存
+- **爆炸机制**：label 放低基数维度（路由十几个 × 方法几种 ≈ 几十条序列）没问题；放 `game_id`/`user_id` 这种高基数值，一万个房间 = 每个指标爆炸成上万条序列，Prometheus 内存打爆、查询卡死。这是 Prometheus 最经典的生产事故
+- **正确分工（面试标准答案）**：metrics 看聚合趋势，日志查个案（带 trace_id/game_id），trace 看调用链——"metrics 看趋势、日志查个案、trace 看链路"
+- **关联代码**：`backend/app/core/metrics.py` 头部注释；label 只用了 event_type / action_type 这类低基数维度
+
+### C03 Histogram、桶与"P99 是估算"（2026-08-10 · A 组）
+
+- **问题**：想算 P99 延迟，但 Prometheus 每 15s 才拉一次，拿不到每个请求的原始值，无法排序
+- **Histogram 的解法**：不存原始值，只存"落在每个区间的累计个数"。区间边界就是桶（buckets）。一个延迟 37ms 的观测，会给 ≤50ms、≤100ms、≤1s……所有不小于它的桶各 +1
+- **P99 怎么算出来**：总 1000 个请求，第 990 名落在哪个桶？查各桶计数找到它落在 50ms~100ms 桶，然后**假设桶内均匀分布做线性插值**，估出约 98ms——所以 P99 是估算值不是精确值
+- **推论（面试追问点）**：估算精度取决于桶边界设计。桶要按"目标延迟"加密设置——我们要验证 P99 < 100ms，就在 5ms~200ms 区间密集设桶（见 `metrics.py` 的 buckets 参数）；桶设糙了 P99 就没意义
+- **关联代码**：`backend/app/core/metrics.py` 的 `ws_broadcast_latency` / `game_action_latency`
+
 ## 2026-08-10 · A 组观测体系
 
 ### 002 prometheus-fastapi-instrumentator 8.x 与 fastapi 的 starlette 版本冲突

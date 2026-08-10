@@ -1,0 +1,8 @@
+# Grafana 数据源预置：容器启动即自动配好 Prometheus 数据源，无需手工点击
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090   # 同一 compose 网络内直接用服务名访问
+    isDefault: true

@@ -1,0 +1,11 @@
+# Grafana 仪表盘预置：自动加载 /var/lib/grafana/dashboards 下的仪表盘 JSON
+apiVersion: 1
+providers:
+  - name: default
+    folder: Aivalon
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

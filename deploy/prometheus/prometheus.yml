@@ -1,0 +1,11 @@
+# Prometheus 抓取配置：告诉 Prometheus 去哪拉指标、多久拉一次
+global:
+  scrape_interval: 5s      # 压测观测需要更密的采样（默认 15s 曲线太糙）
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "aivalon-api"
+    metrics_path: /metrics
+    static_configs:
+      # uvicorn 跑在宿主机本地，容器内要用 host.docker.internal 才能访问到
+      - targets: ["host.docker.internal:8000"]
