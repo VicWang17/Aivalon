@@ -31,6 +31,17 @@
 - **推论（面试追问点）**：估算精度取决于桶边界设计。桶要按"目标延迟"加密设置——我们要验证 P99 < 100ms，就在 5ms~200ms 区间密集设桶（见 `metrics.py` 的 buckets 参数）；桶设糙了 P99 就没意义
 - **关联代码**：`backend/app/core/metrics.py` 的 `ws_broadcast_latency` / `game_action_latency`
 
+## 2026-08-10 · B 组压测平台
+
+### 003 压测邮箱被 email-validator 拒绝：特殊用途 TLD 不可用作测试数据
+
+- **现象**：压测准备脚本批量注册用户全部 422，`value is not a valid email address: The part after the @-sign is a special-use or reserved name`
+- **根因**：测试邮箱用的 `@bench.local`——`.local` 是 RFC 6762 保留的特殊用途 TLD（mDNS 专用），email-validator 默认拒绝所有特殊用途域名（`.local`/`.test`/`.invalid`/`.localhost`/`.example`）
+- **解决**：改用普通 `.com` 域名 `@aivalon-bench.com`
+- **经验**：① 造测试数据也要过真实性校验——"看起来像邮箱"和"能通过校验的邮箱"是两回事，测试数据的构造要用真实字段约束；② 这类校验规则（保留 TLD 清单）属于隐性知识，踩一次记一次；③ 错误信息里 `special-use or reserved name` 就是直接线索，读懂报错比换方案快
+
+
+
 ## 2026-08-10 · A 组观测体系
 
 ### 002 prometheus-fastapi-instrumentator 8.x 与 fastapi 的 starlette 版本冲突
