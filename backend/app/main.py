@@ -6,6 +6,7 @@ from fastapi_limiter import FastAPILimiter
 from prometheus_fastapi_instrumentator import Instrumentator
 from app.core.redis import redis_pool
 from app.core import metrics  # noqa: F401  # 导入即注册自定义指标到 /metrics
+from app.core.tracing import TraceIdMiddleware, setup_logging
 from app.routers import auth, game, ws, users
 
 @asynccontextmanager
@@ -25,6 +26,10 @@ app = FastAPI(
 
 # Prometheus 指标：自动采集各路由的 QPS 与延迟分位数，暴露在 /metrics
 Instrumentator().instrument(app).expose(app)
+
+# trace_id 透传：生成/接续 X-Request-ID，注入日志上下文与响应头
+setup_logging()
+app.add_middleware(TraceIdMiddleware)
 
 # 注册路由
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
