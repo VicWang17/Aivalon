@@ -6,8 +6,6 @@ from unittest.mock import AsyncMock, MagicMock
 from app.core.security import get_password_hash
 from app.models.user import User
 
-client = TestClient(app)
-
 # Mock Redis
 async def override_get_redis():
     mock = AsyncMock()
@@ -44,27 +42,29 @@ app.dependency_overrides[get_redis] = override_get_redis
 app.dependency_overrides[get_db] = override_get_db
 
 def test_login_and_me():
-    print("Testing login...")
-    # 1. Login
-    response = client.post("/api/v1/auth/login", json={"username": "testuser", "password": "password123"})
-    if response.status_code != 200:
-        print(f"Login failed: {response.text}")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["code"] == 0
-    token = data["data"]["access_token"]
-    assert token is not None
-    print(f"Login success, token: {token[:20]}...")
-    
-    # 2. Access /me
-    print("Testing /me endpoint...")
-    response = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
-    if response.status_code != 200:
-        print(f"/me failed: {response.text}")
-    assert response.status_code == 200
-    user_data = response.json()
-    assert user_data["data"]["username"] == "testuser"
-    print("Test passed! /me returned correct user.")
+    # 用 with 块启动 TestClient 以触发 lifespan（FastAPILimiter.init 依赖真实 Redis，需 docker 在线）
+    with TestClient(app) as client:
+        print("Testing login...")
+        # 1. Login
+        response = client.post("/api/v1/auth/login", json={"username": "testuser", "password": "password123"})
+        if response.status_code != 200:
+            print(f"Login failed: {response.text}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["code"] == 0
+        token = data["data"]["access_token"]
+        assert token is not None
+        print(f"Login success, token: {token[:20]}...")
+        
+        # 2. Access /me
+        print("Testing /me endpoint...")
+        response = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        if response.status_code != 200:
+            print(f"/me failed: {response.text}")
+        assert response.status_code == 200
+        user_data = response.json()
+        assert user_data["data"]["username"] == "testuser"
+        print("Test passed! /me returned correct user.")
 
 if __name__ == "__main__":
     test_login_and_me()
