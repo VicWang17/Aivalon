@@ -49,3 +49,6 @@ pnpm-debug.log*
 # Logs
 *.log
 logs/
+
+# 面试问答私库（个人备考材料，不入库）
+interview_qa.md
