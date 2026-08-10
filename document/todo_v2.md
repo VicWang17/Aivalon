@@ -8,7 +8,7 @@
 ## A. 可观测性（一切优化的前置）
 
 ### A.1 指标（Prometheus + Grafana）
-- [ ] 接入 prometheus-client，暴露 /metrics 端点
+- [x] 接入 prometheus-client，暴露 /metrics 端点
 - [ ] API 指标：QPS、延迟分位数（P50/P95/P99）、按路由分组
 - [ ] WS 指标：当前连接数、消息收发速率、广播延迟
 - [ ] 对局指标：活跃房间数、事件写入速率、action 处理耗时

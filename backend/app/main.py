@@ -3,7 +3,9 @@ from contextlib import asynccontextmanager
 import redis.asyncio as redis
 from fastapi import FastAPI
 from fastapi_limiter import FastAPILimiter
+from prometheus_fastapi_instrumentator import Instrumentator
 from app.core.redis import redis_pool
+from app.core import metrics  # noqa: F401  # 导入即注册自定义指标到 /metrics
 from app.routers import auth, game, ws, users
 
 @asynccontextmanager
@@ -20,6 +22,9 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan
 )
+
+# Prometheus 指标：自动采集各路由的 QPS 与延迟分位数，暴露在 /metrics
+Instrumentator().instrument(app).expose(app)
 
 # 注册路由
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])

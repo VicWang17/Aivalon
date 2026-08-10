@@ -19,3 +19,6 @@ httpx>=0.26.0
 openai>=1.0.0
 fastapi-limiter==0.1.6
 fastapi-mail>=1.4.1
+# Observability
+prometheus-client>=0.20.0
+prometheus-fastapi-instrumentator>=7.0.0,<8.0.0  # 8.x 强制 starlette 1.x，与 fastapi 0.128 的 starlette<0.51 冲突
