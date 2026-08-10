@@ -28,18 +28,26 @@ def main():
     url = f"{BASE_URL}/api/v1/games/{args.game_id}/ai_thinking"
     headers = {"X-Internal-Secret": settings.SECRET_KEY}
     count = 0
+    errors = 0
     print(f"广播源启动：room={args.game_id} rate={args.rate}/s")
     try:
         while True:
-            resp = requests.post(url, json={"player_id": 900001}, headers=headers, timeout=5)
+            try:
+                resp = requests.post(url, json={"player_id": 900001}, headers=headers, timeout=5)
+                if resp.status_code != 200:
+                    errors += 1
+                    print(f"[{count}] 广播失败: {resp.status_code} {resp.text[:100]}")
+            except requests.RequestException as e:
+                # 服务高压时源自身也可能连接超时——重试而不是退出，保证压测流量持续
+                errors += 1
+                if errors % 10 == 1:
+                    print(f"[{count}] 源发送异常(累计{errors}次): {type(e).__name__}")
             count += 1
-            if resp.status_code != 200:
-                print(f"[{count}] 广播失败: {resp.status_code} {resp.text[:100]}")
-            elif count % 50 == 0:
-                print(f"[{count}] 已发送")
+            if count % 50 == 0:
+                print(f"[{count}] 已发送 (errors={errors})")
             time.sleep(interval)
     except KeyboardInterrupt:
-        print(f"广播源停止，共发送 {count} 条")
+        print(f"广播源停止，共发送 {count} 条, 异常 {errors} 次")
 
 
 if __name__ == "__main__":

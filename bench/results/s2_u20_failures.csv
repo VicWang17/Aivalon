@@ -1,0 +1,4 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+POST,POST /action (assassinate),HTTPError('500 Server Error: Internal Server Error for url: POST /action (assassinate)'),1,2026-08-10T17:36:40Z,2026-08-10T17:36:40Z
+POST,POST /games (创建对局),"CatchResponseError('创建对局失败: 500 {""detail"":""Failed to create game persistence""}')",3,2026-08-10T17:35:48Z,2026-08-10T17:35:48Z
+POST,POST /games (创建对局),CatchResponseError('创建对局失败: 500 Internal Server Error'),2,2026-08-10T17:35:48Z,2026-08-10T17:35:48Z

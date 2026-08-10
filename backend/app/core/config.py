@@ -57,6 +57,7 @@ class Settings(BaseSettings):
 
     # AI
     AI_USE_LLM: bool = True  # False 时 AI 直接走规则引擎：压测专用，避免 LLM 延迟与成本污染数据
+    AI_TASK_RATE_LIMIT: str = "60/m"  # AI 任务限流：v1 为保护 LLM 配额所设；压测时调高（如 100000/m）
 
     @property
     def CELERY_BROKER_URL(self) -> str:

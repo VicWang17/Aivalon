@@ -74,6 +74,12 @@ class S3SpectatorUser(User):
                     response_time=(now - float(ts)) * 1000,
                     response_length=len(raw), exception=None,
                 )
+        except websocket.WebSocketTimeoutException:
+            # 收的是"超时无消息"而非广播样本：单独记名，不污染广播延迟分位数
+            self.environment.events.request.fire(
+                request_type="WS", name="recv timeout (无广播)",
+                response_time=0, response_length=0, exception=None,
+            )
         except Exception as e:
             self.environment.events.request.fire(
                 request_type="WS", name="recv (广播延迟)",

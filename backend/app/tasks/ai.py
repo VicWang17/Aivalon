@@ -1,4 +1,5 @@
 from app.core.celery_app import celery_app
+from app.core.config import settings
 from app.services.game_service import GameService
 from app.services.ai_service import AIService
 from app.db.base import SessionLocal
@@ -12,7 +13,7 @@ import asyncio
 import json
 import requests
 
-@celery_app.task(bind=True, queue="ai_queue", max_retries=5, rate_limit='60/m')
+@celery_app.task(bind=True, queue="ai_queue", max_retries=5, rate_limit=settings.AI_TASK_RATE_LIMIT)
 def process_ai_turn(self, game_id: str, player_id: int):
     """
     处理 AI 玩家的回合

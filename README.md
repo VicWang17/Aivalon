@@ -7,6 +7,21 @@
 - **Frontend**: Vue 3, TypeScript, Vite, TailwindCSS (计划中)
 - **Backend**: Python 3.10+, FastAPI, Pydantic, SQLAlchemy
 - **Infrastructure**: MySQL 8.0, Redis, RabbitMQ (via Docker Compose)
+- **Observability**: Prometheus + Grafana（声明式预置，随 compose 一键启动）
+- **Benchmark**: Locust 压测平台（`bench/`，5 类标准场景）
+
+## 性能基线（v1，压测驱动优化对照组）
+
+v2 架构升级以实测基线为依据推进。关键基线数据（单节点，i7-9750H / 32GB）：
+
+- 读接口容量拐点 **~340 RPS**；对局动作 P50 ~40ms（10 并发房间）
+- WebSocket **2000 并发连接零失败**（修复连接池雪崩后，见 `document/DEVLOG.md` 006）
+- 广播延迟随连接数近线性劣化（O(N) 顺序广播），是网关重构的靶子：
+
+![广播延迟劣化曲线](document/benchmark/images/s3_broadcast_latency.png)
+
+完整数据与瓶颈分析：[document/benchmark/v1_baseline.md](document/benchmark/v1_baseline.md)
+
 
 ## 快速开始 (Quick Start)
 
