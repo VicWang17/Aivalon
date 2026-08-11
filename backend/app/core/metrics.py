@@ -56,6 +56,16 @@ game_action_latency = Histogram(
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1, 2, 5),
 )
 
+# ---- 缓存 ----
+# 各级缓存的命中/未命中。level 取 l1 / l2 / db，都是低基数维度。
+# 这是多级缓存唯一的验收口径：L1 命中率说明进程内缓存值不值得，
+# db 那一档的增速就是真实回源 QPS。
+cache_reads = Counter(
+    "aivalon_cache_reads_total",
+    "Cache reads by level and result",
+    ["level", "result"],
+)
+
 # ---- AI 链路 ----
 # AI 队列积压深度（周期性从 broker 读取）
 ai_queue_depth = Gauge(

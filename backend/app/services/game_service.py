@@ -20,6 +20,7 @@ import json
 import copy
 from app.core.redis import redis_client
 from app.core.room_actor import actor_manager
+from app.core import cache
 from app.core import event_journal
 from celery import group
 
@@ -723,3 +724,45 @@ class GameService:
             return events
         finally:
             db.close()
+
+    @staticmethod
+    def _events_to_dicts(events: List[GameEventModel]) -> List[dict]:
+        """ORM 对象 → 可 JSON 化的 dict。
+
+        必须在进缓存**之前**转好：L1 存的是 Python 对象、L2 存的是 JSON 字符串，
+        如果直接把 ORM 对象塞进 L1，两级缓存里躺的就是两种形状——
+        命中 L1 拿到 ORM 对象、命中 L2 拿到 dict，行为随命中哪一级而变，
+        这种 bug 只在缓存刚过期的那一瞬间出现，极难复现。
+        另外 ORM 对象绑着 Session，Session 关掉后访问懒加载字段会直接抛异常。
+        """
+        return [
+            {
+                "id": e.id,
+                "game_id": e.game_id,
+                "seq": e.seq,
+                "event_type": e.event_type,
+                "player_id": e.player_id,
+                "payload": e.payload,
+                "created_at": e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in events
+        ]
+
+    @staticmethod
+    async def get_game_events_cached(game_id: str) -> List[dict]:
+        """回放事件流的读路径：L1 进程内 → L2 Redis → 回源 MySQL。
+
+        为什么缓存选这条路径，而不是对局状态：
+        对局状态那条路（`load_game`）看着像缓存，其实不是——归属节点的 `games`
+        字典是 Actor 的**权威状态**（单写者），而非归属节点刻意不留副本，
+        否则房间迁过来时会照着旧副本继续演进，造成对局回退（DEVLOG 018）。
+        往那条路上加缓存等于重新引入那个 bug。
+        回放事件流不一样：它是**追加写**的，只增不改，天然适合缓存，
+        而且它是唯一每次都真的回源 MySQL 的读路径。
+        """
+        return await cache.get_or_load(
+            cache.events_key(game_id),
+            lambda: GameService._events_to_dicts(
+                GameService.get_game_events(game_id)),
+            redis=redis_client,
+        )

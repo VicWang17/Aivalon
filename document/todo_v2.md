@@ -74,7 +74,7 @@ python -m app.core.outbox_relay &
 
 ## F. 缓存（简历⑥·上）
 
-- [ ] L1 进程内 + L2 Redis 两级缓存,未命中回源 MySQL
+- [x] L1 进程内 + L2 Redis 两级缓存,未命中回源 MySQL：`core/cache.py`,加在**回放事件流**读路径（全站唯一真回源 MySQL 的接口,且事件只增不改）。**刻意不加在对局状态路径**——那里的 `games` 是 Actor 权威状态,非归属节点留副本会重现 DEVLOG 018 对局回退。L1 有条数上限 + TTL 即一致性上限,指标 `cache_reads{level}`（DEVLOG 025）
 - [ ] 对局快照事件驱动失效（状态推进即失效）+ TTL 兜底
 - [ ] 穿透：布隆过滤器拦截不存在的 game_id / user_id
 - [ ] 击穿：热点快照 singleflight 互斥回源（验收就是"热 key 失效瞬间只回源 1 次",单测即可断言,不用压测）

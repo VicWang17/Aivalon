@@ -198,19 +198,14 @@ async def get_game_events(
 ):
     """
     获取对局的所有事件流（回放用）
+
+    走 L1 进程内 + L2 Redis 两级缓存，未命中回源 MySQL（见 app/core/cache.py）。
+    这条路径是全站唯一每次都真的查 MySQL 的读接口，而回放事件只增不改，
+    缓存起来没有一致性负担——新事件追加时由写路径失效（F-2）。
     """
-    # 1. 检查游戏是否存在（Service 会查库）
-    events = GameService.get_game_events(game_id)
-    if not events:
-        # 如果没有事件，可能游戏未开始或不存在
-        # 再确认一下游戏是否存在
-        game = GameService.get_game(game_id)
-        if not game:
-             # 如果内存也没有，那就真没有了
-             # 实际上 get_game_events 是查库，如果库里没事件，但游戏在进行中，也是空列表
-             # 这里简单返回空列表即可，或者抛出 404 如果游戏ID无效
-             pass
-    
+    events = await GameService.get_game_events_cached(game_id)
+    # 空列表照样返回 200：库里没事件不代表房间不存在（可能刚建局还没落盘），
+    # 这里答 404 会让前端把"还没开始"误判成"房间不存在"
     return ResponseModel(data=events)
 
 @router.get("/{game_id}", response_model=ResponseModel[GameState])
