@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi_limiter import FastAPILimiter
 from prometheus_fastapi_instrumentator import Instrumentator
 from app.core.redis import redis_pool
+from app.core import cache
 from app.core import metrics  # noqa: F401  # 导入即注册自定义指标到 /metrics
 from app.core.event_flusher import flusher_loop
 from app.core import node_registry
@@ -36,6 +37,9 @@ async def lifespan(app: FastAPI):
     # WS 跨节点扇出：连接挂在哪个节点与房间归属无关，广播要按连接路由表定向投递
     socket_manager.manager.bind_cluster(redis_client, cluster.node_id)
     socket_manager.manager.start()
+    # 缓存失效广播：L2 是共享的删一次就够，L1 在各进程自己堆里，得喊一声让大家清
+    cache.bind(redis_client)
+    cache.start()
     # DB 连接池泄漏探针（默认关闭，DB_POOL_PROBE=true 时启用，压测排障用）
     probe_task = pool_probe.start(engine, label="main")
     yield
@@ -43,6 +47,7 @@ async def lifespan(app: FastAPI):
     if probe_task:
         probe_task.cancel()
     await socket_manager.manager.stop()
+    await cache.stop()
     # 优雅下线：主动摘掉自己，把计划内重启的路由空窗从 TTL 级别压到一次往返
     await cluster.stop()
     await redis_client.close()

@@ -148,11 +148,11 @@ async def get_or_load(
     return value
 
 
-async def invalidate(key: str, redis=None) -> None:
-    """失效一个 key。
+async def invalidate(key: str, redis=None, broadcast: bool = True) -> None:
+    """失效一个 key：清本进程 L1 + 删 L2 + 广播通知其他进程清它们的 L1。
 
-    注意这只清得掉**本进程**的 L1——别的节点的 L1 只能等它自己的 TTL 到。
-    要做到全集群立即失效，需要一条广播通道通知每个进程清 L1（F-2 的事）。
+    三步都要做，缺一步都会留下旧值：L2 删了但别的进程 L1 还在供旧值，
+    就是 F-1 里那个"L1 跨进程失效不了"的洞。
     """
     l1.delete(key)
     if redis is not None:
@@ -160,3 +160,113 @@ async def invalidate(key: str, redis=None) -> None:
             await redis.delete(key)
         except Exception as e:
             logger.warning("L2 失效失败: key=%s %s", key, e)
+    if broadcast:
+        await _publish_invalidation(key, redis=redis)
+
+
+# ----------------------------------------------------------------------
+# L1 跨进程失效
+# ----------------------------------------------------------------------
+#
+# 这是 F-1 留下的洞：L2 是共享的，删一次全集群立刻看到；而 L1 在每个进程自己的
+# 堆里，别的进程改了数据，这个进程的 L1 毫不知情，会继续供旧值直到自己 TTL 到。
+# 补法是一条广播通道：谁失效了 key 就喊一声，所有进程听见就清自己的 L1。
+#
+# 这里刻意用**全集群广播**，和 E-1 的 WS 扇出刻意不广播正好相反。
+# 区别在于有没有办法知道该发给谁：WS 扇出有连接路由表，能查出"这个房间的连接在哪几个
+# 节点"，定向发就省下无关节点的收发；而"哪个进程的 L1 里存着这个 key"没有任何登记，
+# 每个进程都可能有，所以只能广播。**能定向的时候定向，定不了的时候才广播。**
+#
+# 也不需要防环：E-1 那里收到转发要防止再次扇出（否则 A→B→A 死循环），
+# 而这里收到消息只是删本地一个 key，删自己已经删过的 key 是幂等的，
+# 发布者收到自己的消息也无所谓。**幂等的操作不需要防环，这是能省掉一层机制的原因。**
+
+INVALIDATE_CHANNEL = "aivalon:cache:invalidate"
+
+_redis = None
+_sub_task: Optional[asyncio.Task] = None
+_pubsub = None
+
+
+def bind(redis) -> None:
+    """接入失效广播。不调用即为单进程模式：失效只清本地，不发广播。"""
+    global _redis
+    _redis = redis
+
+
+async def _publish_invalidation(key: str, redis=None) -> None:
+    client = redis if redis is not None else _redis
+    if client is None:
+        return
+    try:
+        await client.publish(INVALIDATE_CHANNEL, key)
+    except Exception as e:
+        # 广播失败只是让别的进程多等一个 L1_TTL，不影响正确性——
+        # 这正是 L1 TTL 作为兜底存在的意义，所以这里只记日志
+        logger.warning("失效广播发送失败，其他进程将等 L1 过期: key=%s %s", key, e)
+
+
+async def _subscribe_loop() -> None:
+    global _pubsub
+    while True:
+        try:
+            pubsub = _redis.pubsub()
+            _pubsub = pubsub
+            await pubsub.subscribe(INVALIDATE_CHANNEL)
+            logger.info("缓存失效频道已订阅: %s", INVALIDATE_CHANNEL)
+            async for raw in pubsub.listen():
+                if raw.get("type") != "message":
+                    continue
+                key = raw.get("data")
+                if key:
+                    # 只清 L1。L2 是共享的，发布方已经删过了，这里再删一次纯属多余往返
+                    l1.delete(key)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # 订阅断了必须重连：断开期间本进程的 L1 会一直供旧值，
+            # 最坏情况退化成"只有 TTL 兜底"
+            logger.warning("缓存失效订阅中断，2s 后重连: %s", e)
+            await asyncio.sleep(2)
+
+
+def start() -> None:
+    global _sub_task
+    if _redis is not None and _sub_task is None:
+        _sub_task = asyncio.create_task(_subscribe_loop())
+
+
+async def stop() -> None:
+    global _sub_task, _pubsub
+    if _sub_task:
+        _sub_task.cancel()
+        _sub_task = None
+    if _pubsub is not None:
+        try:
+            await _pubsub.aclose()
+        except Exception:
+            pass
+        _pubsub = None
+
+
+async def drop_subscription() -> None:
+    """断开底层 socket，订阅循环会自行重连。测试模拟网络抖动用。
+    只断 socket 不动 PubSub 对象——理由同 socket_manager.drop_subscription。"""
+    conn = getattr(_pubsub, "connection", None) if _pubsub else None
+    if conn is not None:
+        try:
+            await conn.disconnect()
+        except Exception:
+            pass
+
+
+async def invalidate_events(game_id: str, redis=None) -> None:
+    """失效某局的回放事件流缓存。
+
+    调用时机很关键：必须在**MySQL 真的写进去之后**，不是动作发生时。
+    因为事件走 Write-Behind（先进 Redis Stream，flusher 200ms 后批量刷 MySQL），
+    而这份缓存回源的是 MySQL。在动作发生时失效，紧随其后的读会回源到一个
+    **还没刷进新事件的 MySQL**，然后把这份旧结果缓存 300 秒——比不失效更糟。
+    所以失效点挂在 flusher 提交成功之后。
+    """
+    await invalidate(events_key(game_id), redis=redis)

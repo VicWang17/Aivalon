@@ -13,6 +13,7 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import func
 
+from app.core import cache
 from app.core import event_journal
 from app.core.redis import get_new_redis_client
 from app.db.base import SQLALCHEMY_DATABASE_URL
@@ -104,6 +105,23 @@ async def flush_once(redis) -> int:
         return 0
 
     await asyncio.to_thread(_flush_batch, entries)
+
+    # 事件驱动失效：刷库成功之后才失效回放事件流缓存。
+    #
+    # 时机是这里唯一要紧的事。这份缓存回源的是 MySQL，而事件走 Write-Behind——
+    # 动作发生时事件只进了 Redis Stream，MySQL 里还没有。如果在动作发生时失效，
+    # 紧随其后的读会回源到一个**还没刷进新事件的 MySQL**，拿到旧结果再缓存 300 秒,
+    # 比不失效更糟：不失效至少是旧值，提前失效是"把旧值重新盖章成新值"。
+    # 所以失效点挂在 commit 之后。**失效要对齐数据源的可见时刻，不是业务动作的发生时刻。**
+    #
+    # 按 game_id 去重：一批 500 条事件可能只涉及几个房间，逐条发就是几百次无用广播。
+    touched = {fields.get("game_id") for _, fields in entries if fields.get("game_id")}
+    for game_id in touched:
+        try:
+            await cache.invalidate_events(game_id, redis=redis)
+        except Exception as e:
+            # 失效失败不该让刷库回滚：数据已经落库了，最坏是缓存多留一个 TTL 的旧值
+            logger.warning("失效回放缓存失败: game=%s %s", game_id, e)
 
     new_cursor = entries[-1][0]
     await redis.set(event_journal.JOURNAL_CURSOR, new_cursor)
