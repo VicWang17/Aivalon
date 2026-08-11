@@ -48,7 +48,7 @@ def _flush_batch(entries: list) -> None:
             # 开局事件：先补建 games 表记录（创建路径已移出 MySQL 热路径）。
             # 顺序要紧：game_events.game_id 有外键指向 games.id，若先插事件行，
             # 外键校验失败会被 INSERT IGNORE 降级成 warning 静默丢弃——GAME_START
-            # 就此永久丢失（全库 372 局零条 GAME_START，见 DEVLOG 013）。
+            # 就此永久丢失（全库 372 局零条 GAME_START，见 DEVLOG 014）。
             if fields.get("event_type") == "GAME_START":
                 stmt = mysql_insert(GameModel).prefix_with("IGNORE").values(
                     id=fields["game_id"],
@@ -86,16 +86,6 @@ def _flush_batch(entries: list) -> None:
                     game_record.winner = fields.get("winner") or None
                     game_record.finished_at = func.now()
 
-            # 开局事件：补建 games 表记录（创建路径已移出 MySQL 热路径）
-            if fields.get("event_type") == "GAME_START":
-                stmt = mysql_insert(GameModel).prefix_with("IGNORE").values(
-                    id=fields["game_id"],
-                    status="playing",
-                    player_ids=payload.get("player_ids", []),
-                    winner=None,
-                    user_id=payload.get("creator_id"),
-                )
-                db.execute(stmt)
         db.commit()
     except Exception:
         db.rollback()
