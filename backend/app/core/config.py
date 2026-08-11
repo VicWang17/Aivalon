@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     RATE_LIMIT_ACTION_TIMES: int = 1
     RATE_LIMIT_ACTION_SECONDS: int = 1
 
+    # 集群（房间路由，见 app/core/node_registry.py）
+    # 显式指定节点身份：重启后身份不变，名下房间会漂回来；留空则按 主机名-进程号-随机后缀 自动生成
+    NODE_ID: str = ""
+
     # AI
     AI_USE_LLM: bool = True  # False 时 AI 直接走规则引擎：压测专用，避免 LLM 延迟与成本污染数据
     AI_TASK_RATE_LIMIT: str = "60/m"  # AI 任务限流：v1 为保护 LLM 配额所设；压测时调高（如 100000/m）
