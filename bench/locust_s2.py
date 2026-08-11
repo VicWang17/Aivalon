@@ -9,14 +9,84 @@
 # - 压测要求 AI_USE_LLM=False（规则引擎）与调高限流阈值（RATE_LIMIT_*），见 README
 # - 8 人局任务人数配置固定为 3-4-4-5-5（与 game_rules 一致）
 import json
+import math
 import random
 import uuid
 from pathlib import Path
 
-from locust import HttpUser, between, task
+from locust import HttpUser, between, events, task
 
 USERS_FILE = Path(__file__).parent / "users.json"
 USERS = json.loads(USERS_FILE.read_text()) if USERS_FILE.exists() else []
+
+RESULTS_DIR = Path(__file__).parent / "results"
+
+# ---------------------------------------------------------------------------
+# 原始延迟采集：写进简历的分位数不能用 locust CSV 里的那份
+#
+# 两个问题，都会让"动作 P99"这个数字站不住：
+# 1. locust 的分位数是**分桶估算**——它把响应时间归整后计数（<100ms 归到 1ms、
+#    <1000ms 归到 10ms、更大归到 100ms），再从桶里插值。同 DEVLOG C03 讲 Histogram
+#    的那套，够看趋势，但要写简历就该用原始值算。
+# 2. **分动作看 P99 等于看噪声**。一轮 120s 里 speak 约 200 个请求、propose 只有
+#    20 来个，P99 落在第 2~3 慢的那几个样本上，换一轮就能差一倍（这正是
+#    s2_u20_fix_r1 的 47ms 和 r2 的 130ms 差那么远的原因）。
+#    所以额外把所有动作类请求汇成一个池子，样本量上千，分位数才有意义。
+# ---------------------------------------------------------------------------
+_SAMPLES: dict[str, list[float]] = {}
+
+
+@events.request.add_listener
+def _collect_sample(name, response_time, exception, **kwargs):
+    """只收成功请求：失败请求的耗时是超时值，混进延迟分位数里没有意义"""
+    if exception is not None:
+        return
+    _SAMPLES.setdefault(name, []).append(response_time)
+
+
+def _pct(sorted_vals: list[float], p: float) -> float:
+    """最近秩法（nearest-rank）：第 ceil(p*n) 个样本，不做插值。
+    口径写明是因为不同工具的分位数定义不同，换算法数字会变。"""
+    if not sorted_vals:
+        return float("nan")
+    idx = max(0, math.ceil(p * len(sorted_vals)) - 1)
+    return sorted_vals[idx]
+
+
+def _report(rows: list[tuple[str, list[float]]]) -> str:
+    lines = [f"{'接口':<34}{'样本':>7}{'P50':>9}{'P90':>9}{'P95':>9}{'P99':>9}{'max':>9}"]
+    for name, vals in rows:
+        s = sorted(vals)
+        lines.append(
+            f"{name:<34}{len(s):>7}"
+            f"{_pct(s, .50):>8.1f}{_pct(s, .90):>9.1f}{_pct(s, .95):>9.1f}"
+            f"{_pct(s, .99):>9.1f}{s[-1]:>9.1f}"
+        )
+    return "\n".join(lines)
+
+
+@events.quitting.add_listener
+def _dump_samples(environment, **kwargs):
+    """落原始值 + 打印精确分位数。原始值必须留档，否则事后换口径要重跑压测。"""
+    if not _SAMPLES:
+        return
+    prefix = getattr(environment.parsed_options, "csv_prefix", None) or "s2_raw"
+    out = RESULTS_DIR / f"{Path(prefix).name}_latency_raw.json"
+
+    actions = [v for name, vals in _SAMPLES.items()
+               if name.startswith("POST /action") for v in vals]
+    rows = sorted(_SAMPLES.items())
+    if actions:
+        rows.append(("动作类合计（POST /action *）", actions))
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(
+        {"note": "单位 ms，仅成功请求；分位数口径为最近秩法",
+         "samples": {k: v for k, v in _SAMPLES.items()},
+         "action_pool": actions},
+        ensure_ascii=False))
+    print(f"\n=== 精确分位数（原始值，最近秩法，单位 ms）===\n{_report(rows)}")
+    print(f"原始样本已存 {out}")
 
 TEAM_SIZES = [3, 4, 4, 5, 5]  # 8 人局第 1~5 轮任务人数
 EVIL_CHARS = {"assassin", "morgana", "minion"}
