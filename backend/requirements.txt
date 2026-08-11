@@ -1,4 +1,4 @@
-fastapi>=0.109.0
+fastapi>=0.128.0,<0.129.0  # 锁定基线实测版本；0.141 引入 _IncludedRouter，与 instrumentator 7.x 的 route.path 假设不兼容
 uvicorn[standard]>=0.27.0
 sqlalchemy>=2.0.25
 alembic>=1.13.1
@@ -15,6 +15,7 @@ requests>=2.31.0
 cryptography>=42.0.0
 # Testing
 pytest>=8.0.0
+pytest-asyncio>=0.23.0  # room_actor/幂等测试是 async 用例；缺失时 pytest 9 直接判 fail（旧机为手动补装，此处补上显式依赖）
 httpx>=0.26.0
 openai>=1.0.0
 fastapi-limiter==0.1.6

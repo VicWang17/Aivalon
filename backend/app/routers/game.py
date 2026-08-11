@@ -1,11 +1,11 @@
 """
 这个文件定义了对局相关的路由接口。
 """
+import asyncio
 import random
 import time
 from typing import List, Annotated
 from fastapi import APIRouter, Depends, HTTPException, status, Header
-from sqlalchemy.orm import Session
 from redis.asyncio import Redis
 from app.core.rate_limit import create_game_rate_limit, action_rate_limit
 from app.schemas.game import GameCreateRequest, GameCreateResponse, GameState, GameActionRequest, GameSummary, GameEventSchema, RecentGameSummary
@@ -15,7 +15,7 @@ from app.core.deps import get_current_user
 from app.core.redis import get_redis
 from app.core.idempotency import IdempotencyManager
 from app.models.user import User
-from app.db.base import get_db
+from app.db.base import SessionLocal
 from app.schemas.base import ResponseModel
 from app.core.socket_manager import manager
 from app.schemas.protocol import WSMessage, WebSocketOpCode
@@ -34,11 +34,21 @@ AI_NAMES = [
     "朱莉", "凯特", "莉莉", "莫莉", "诺拉", "佩妮", "瑞秋", "萨拉", "蒂娜", "温蒂"
 ]
 
+def _load_user_map(player_ids: list[int]) -> dict[int, str]:
+    """短生命周期会话查用户名（在线程池执行）：只取 ID→用户名 映射，拿到立即释放连接，
+    不把连接持有过后续的 await（创建对局 90s 超时复盘：连接被持有着跨 Redis 写等待）。"""
+    db = SessionLocal()
+    try:
+        users = db.query(User).filter(User.id.in_(player_ids)).all()
+        return {u.id: u.username for u in users}
+    finally:
+        db.close()
+
+
 @router.post("/", response_model=ResponseModel[GameCreateResponse], dependencies=[Depends(create_game_rate_limit())])
 async def create_game(
     request: GameCreateRequest,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
 ):
     """
     创建新对局。
@@ -52,10 +62,7 @@ async def create_game(
         )
 
     # 2. 从数据库获取用户信息
-    users = db.query(User).filter(User.id.in_(request.player_ids)).all()
-    
-    # 3. 构建 ID 到 用户名 的映射
-    user_map = {u.id: u.username for u in users}
+    user_map = await asyncio.to_thread(_load_user_map, request.player_ids)
     
     # 4. 确定需要命名的 ID
     # 策略：

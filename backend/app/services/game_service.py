@@ -140,7 +140,11 @@ class GameService:
         """
         恢复游戏状态 (优先从 Redis，其次 DB)
         """
-        if not db:
+        # 注意：必须先用独立变量记录所有权——若在 finally 里直接判断 `if not db`，
+        # 此时 db 已被重新赋值为自建 Session（恒真），关闭逻辑永远走不到 → 每次恢复泄漏一个连接。
+        # （S2 复测：15 个房间唤醒即打满共享池，创建对局 30s 超时的根因）
+        own_session = db is None
+        if own_session:
             db = SessionLocal()
         
         client = redis_conn or redis_client
@@ -170,7 +174,7 @@ class GameService:
             print(f"[GameService] Failed to restore game state: {e}")
             return None
         finally:
-            if not db: # 如果是自己创建的 session，需要关闭
+            if own_session: # 只关闭自己创建的 session，调用方传入的由调用方负责
                 db.close()
 
     @staticmethod

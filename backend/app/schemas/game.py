@@ -21,6 +21,7 @@ class PlayerState(BaseModel):
     # 临时状态标记
     has_voted: bool = False
     has_acted: bool = False # 是否已执行任务/刺杀
+    is_connected: bool = True # 连接状态（结算时随 players_data 上报统计任务；WS 断线标记目前未回写，默认 True）
     
     # AI 记忆字段 (仅服务端可见，用于 LLM 上下文保持)
     ai_memory: str = ""
