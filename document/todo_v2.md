@@ -9,7 +9,7 @@
 
 ## 🔄 交接状态（2026-08-11 晚，换机/换 AI 续做必读）
 
-**当前位置**：D 组 D-2 Write-Behind 收尾。30s 超时墙已闭环（DEVLOG 012），kill 演练 + RPO 量化已过（DEVLOG 013），顺带修掉一个静默丢事件 bug（DEVLOG 014）。**只剩"MySQL 写压力下降比例"一项**（缺基线对照组绝对值，需重构口径）。
+**当前位置**：**D-2 Write-Behind 已全部闭环**。30s 超时墙闭环（DEVLOG 012）、kill 演练 + RPO 量化（013）、静默丢事件 bug 修复（014）、写压力量化 78~81%（015）。**下一步进 D-3（房间路由一致性哈希 + 节点宕机迁移）**。
 
 **已完成**：A 组（可观测）、B 组（压测平台 + v1 基线报告）、C 组（测试安全网 24 项）、D-1（房间 Actor 去锁）、D-2 代码（Write-Behind：事件先入 Redis Stream + 快照一个事务，flusher 每 200ms 批量刷 MySQL）。
 
@@ -20,8 +20,11 @@
 - ✅ **RPO 已量化（DEVLOG 013）**：20 房间负载下 427 次采样 @0.1s——峰值未刷 **16 条**（最坏 RPO）/ P95 10 / 均值 3.45 / 非零占比 84.5%；时间维度 ≤ ~200ms（`FLUSH_INTERVAL`）。注意必须在负载下测，空跑窗口恒为 0
   - 边界（不含糊过去）：`restore_game_state` 的"从 DB 重建 GameState"分支仍是 `# TODO` 返回 `None`，**恢复能力当前依赖 Redis 快照存在**；Redis 全丢时对局无法重建
 - ✅ **顺带修掉一个静默丢事件 bug（DEVLOG 014）**：全库 372 局 `GAME_START` 事件 **0 条**——`game_events.game_id` 有外键指向 `games.id`，而 flusher 先插事件行、后补建 `games` 记录，外键失败被 `INSERT IGNORE` 降级成 warning 静默丢弃。修法：`games` 记录补建提到事件插入之前。这个 bug 是 013 演练的对账环节（`count(*)` vs `max(seq)` 差 1）挖出来的
-- ❌ MySQL 写压力下降比例未量化（简历"写压力 -80%"需要这个数字）
-  - 卡点：`v1_baseline.md` **没有记录绝对写 QPS 数字**，只有定性结论（"每动作同步写 MySQL，写路径饱和"，P0 瓶颈）。没有对照组绝对值，需要重新构造对比口径（如取 MySQL `Com_insert`/`Innodb_rows_inserted` 在一轮 S2 前后的增量，对比"每动作同步写"与"批量刷库"两种模式）
+- ✅ **MySQL 写压力已量化（DEVLOG 015）**：**写事务数下降 78~81%**（每事件 commit 1.07 → 0.20~0.24，即 4~5 个事件合并进一个事务）
+  - 口径：`SHOW GLOBAL STATUS` 计数器增量 ÷ 事件数（归一化，避免"变快"混淆"变省"）；对照组用 `git worktree` 检出 a8f21ea（Actor 已有、Write-Behind 之前，只差一个变量）跑完整 v1 栈，同机同中间件同压测脚本，各两轮
+  - **⚠️ 简历口径必须写"写事务数下降 ~80%"，不能写"写压力下降 80%"**——行数维度（`Innodb_rows_inserted`）下降为 **0%**（事件该落库还是要落库，只是晚 200ms），笼统说"写压力"会被理解成写入量，追问即崩
+  - 测量脚本 `bench/measure_write_pressure.py`（`start/stop/diff` 三段），E/F/G 组同类量化可复用
+  - 副产物：创建对局 P50 40→23ms、P75 310→97ms、max 380→180ms；v1 有 4 次 mission 500（DEVLOG 005 竞态家族），v2 零失败
 - ✅ **30s 超时墙已闭环（2026-08-11 16:00，DEVLOG 012）**。真凶不是原假设的 Actor future 悬挂泄漏，而是**"持有并等待"自死锁**：`get_current_user` 用 `Depends(get_db)`（连接持有到请求结束）+ 下游 `_load_user_map` 再取第二个连接 → 单请求持有 2 个连接 → 15 个鉴权连接占满池后集体等第二个连接，池永不恢复。**这个 bug 由 011 的修复引入**（把复用 db 的查询抽成独立 Session，单请求持有数 1→2）
   - 定位手段：新增连接池探针 `app/core/pool_probe.py`（checkout 时记 trace_id + 调用栈，报告持有超阈值未还的连接），`DB_POOL_PROBE=true` 开启，默认关闭
   - 修法：`get_current_user` 改手动短生命周期 Session（与 `get_ws_user` 同一招，DEVLOG 006 当时只改了 WS 路径）
@@ -132,10 +135,10 @@ python -m app.core.outbox_relay &
 - [ ] AI 发言挂载降级开关
 
 ### D.4 验证（数字待实测回填）
-- [ ] C 组测试全部通过（重构后回归）
-- [ ] S2 压测对比报告：动作 TPS 较基线提升 N 倍（目标参考：≥ 5,000 TPS，P99 ≤ 50ms）
-- [ ] kill 房间节点演练：房间迁移、事件不丢不重
-- [ ] MySQL 写入 QPS 较基线下降比例（目标参考：≥ 80%）
+- [x] C 组测试全部通过（重构后回归，24 项全绿）
+- [ ] S2 压测对比报告：动作 TPS 较基线提升 N 倍（目标参考：≥ 5,000 TPS，P99 ≤ 50ms）——**单机 Python 栈不可能到 5000 TPS，D-5 出报告时按实测改简历**
+- [x] kill 演练：**进程**宕机恢复、事件不丢不重（DEVLOG 013）；~~房间跨**节点**迁移~~ 待 D-3
+- [x] MySQL 写入下降比例：**写事务数 -78~81%**（DEVLOG 015）。注意口径是事务数不是行数，行数为 0%
 - [ ] ADR-01（单写者 vs 分布式锁）、ADR-02（Write-Behind RPO）
 
 ## E. 长连接与广播（简历第 4 条证据链）

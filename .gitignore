@@ -55,3 +55,6 @@ bench/users.json
 
 # 宕机演练脚本的临时状态（记录当前演练对局 id）
 bench/.drill_state.json
+
+# 写压力测量脚本的计数器快照（中间产物）
+bench/.write_pressure/
