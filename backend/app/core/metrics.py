@@ -27,6 +27,13 @@ ws_frames_merged = Counter(
     "State-update frames coalesced into a later frame (never sent)",
 )
 
+# 因写缓冲积压被主动断开的连接数。
+# 这个值持续上涨说明下游跟不上推送速率，是背压生效的信号，不是 bug。
+ws_slow_consumers_dropped = Counter(
+    "aivalon_ws_slow_consumers_dropped_total",
+    "Connections dropped because their send buffer overflowed",
+)
+
 # ---- 对局层 ----
 # 当前活跃房间数
 active_rooms = Gauge(

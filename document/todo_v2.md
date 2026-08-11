@@ -70,7 +70,7 @@ python -m app.core.outbox_relay &
 - [x] 跨节点扇出：查路由表定向 publish 到目标节点专属频道（不广播全集群）,本节点直发不绕 Redis,收到转发只做本地投递防环。11 项测试（DEVLOG 020）
 - [x] 同 Tick 事件合并帧：50ms 合并窗口内同房间多个 STATE_UPDATE 只下发最后一帧,合并率看 `ws_frames_merged / ws_frames_sent`（DEVLOG 021）
 - [ ] 分级推送：操作者单播 / 房间成员即时广播 / 旁观者聚合批量
-- [ ] 慢消费者背压：写缓冲超阈值主动断开该连接,保护节点
+- [x] 慢消费者背压：每连接独立写缓冲 + 写协程,广播不再 await socket（消除队头阻塞）；缓冲让出一次事件循环后仍满则以 1013 断开,指标 `ws_slow_consumers_dropped`（DEVLOG 022）
 
 ## F. 缓存（简历⑥·上）
 

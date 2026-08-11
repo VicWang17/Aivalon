@@ -8,6 +8,8 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio
+import json
+import time
 
 import pytest
 import pytest_asyncio
@@ -41,12 +43,27 @@ class FakeWS:
     def __init__(self):
         self.sent: list[str] = []
         self.accepted = False
+        self.closed_with = None
 
     async def accept(self):
         self.accepted = True
 
     async def send_text(self, text: str):
         self.sent.append(text)
+
+    async def close(self, code: int = 1000):
+        self.closed_with = code
+
+
+class StalledWS(FakeWS):
+    """永远写不出去的连接：模拟客户端不读数据、TCP 窗口填满。
+
+    真实场景是手机切后台、网络卡住。这类连接会让"在广播循环里直接 await send"
+    的写法卡死整个房间，所以必须能造出来测。
+    """
+
+    async def send_text(self, text: str):
+        await asyncio.Event().wait()      # 永久挂起
 
 
 @pytest_asyncio.fixture
@@ -132,6 +149,9 @@ async def test_non_coalescible_message_is_sent_immediately():
     await m.connect(ws, GAME)
     msg = WSMessage(type=WebSocketOpCode.AI_THINKING, payload={"player_id": 3})
     await m.broadcast(GAME, msg)
+    # 立即下发指的是"不进合并窗口"，不是"broadcast 返回时已写进 socket"——
+    # 真正的写由每条连接的写协程做（背压改造后广播路径不再 await socket）
+    await asyncio.sleep(0.02)
     assert len(ws.sent) == 1, "不可合并的帧不该被压进窗口"
 
 
@@ -144,6 +164,7 @@ async def test_immediate_frame_does_not_overtake_pending_frame():
     await m.broadcast(GAME, _msg("state-first"))          # 进窗口挂起
     await m.broadcast(GAME, WSMessage(
         type=WebSocketOpCode.AI_THINKING, payload={"player_id": 1}))
+    await asyncio.sleep(0.02)                            # 等写协程把缓冲排出去
     assert len(ws.sent) == 2, f"实收 {len(ws.sent)} 帧"
     assert "state-first" in ws.sent[0], "挂起帧应该先被冲出去"
     assert "player_id" in ws.sent[1]
@@ -177,6 +198,79 @@ async def test_merge_happens_at_source_so_only_one_frame_crosses_nodes(redis):
     finally:
         await a.stop()
         await b.stop()
+
+
+def _thinking(pid: int) -> WSMessage:
+    """不可合并的消息：要往缓冲里连续塞多帧就得用它，STATE_UPDATE 会被合并掉"""
+    return WSMessage(type=WebSocketOpCode.AI_THINKING, payload={"player_id": pid})
+
+
+@pytest.mark.asyncio
+async def test_slow_consumer_does_not_block_others_in_room():
+    """核心用例：一条卡死的连接不能拖住同房间其他人。
+
+    原来的写法是在广播循环里逐个 `await ws.send_text()`。客户端不读数据时
+    TCP 窗口填满，那个 await 就永久挂住，**整个房间的广播卡在这一个人身上**。
+    """
+    m = ConnectionManager()
+    stalled, healthy = StalledWS(), FakeWS()
+    await m.connect(stalled, GAME)
+    await m.connect(healthy, GAME)
+    for i in range(40):
+        await m.broadcast(GAME, _thinking(i))
+    await asyncio.sleep(0.1)
+    assert len(healthy.sent) == 40, f"被慢消费者拖住了，健康连接只收到 {len(healthy.sent)} 帧"
+
+
+@pytest.mark.asyncio
+async def test_slow_consumer_is_dropped_when_buffer_overflows():
+    """写缓冲塞满就主动断开：留着它只会一直吃内存，而且积压的帧本身已经是过期状态"""
+    m = ConnectionManager()
+    stalled = StalledWS()
+    await m.connect(stalled, GAME)
+    for i in range(socket_manager.SEND_QUEUE_MAX + 10):
+        await m.broadcast(GAME, _thinking(i))
+    await asyncio.sleep(0.1)
+    assert GAME not in m.active_connections, "慢消费者没被摘掉"
+    assert stalled.closed_with == 1013, f"应以 1013 Try Again Later 关闭，实际 {stalled.closed_with}"
+
+
+@pytest.mark.asyncio
+async def test_healthy_connection_is_never_dropped():
+    """读得动的连接不管发多少帧都不该被断——背压只针对真的跟不上的那条"""
+    m = ConnectionManager()
+    ws = FakeWS()
+    await m.connect(ws, GAME)
+    for i in range(socket_manager.SEND_QUEUE_MAX * 3):
+        await m.broadcast(GAME, _thinking(i))
+    await asyncio.sleep(0.2)
+    assert ws.closed_with is None, "健康连接被误断了"
+    assert len(ws.sent) == socket_manager.SEND_QUEUE_MAX * 3
+
+
+@pytest.mark.asyncio
+async def test_frames_keep_order_on_one_connection():
+    """每条连接一个写协程顺序发送，帧序必须与入队顺序一致"""
+    m = ConnectionManager()
+    ws = FakeWS()
+    await m.connect(ws, GAME)
+    for i in range(20):
+        await m.broadcast(GAME, _thinking(i))
+    await asyncio.sleep(0.1)
+    order = [json.loads(s)["payload"]["player_id"] for s in ws.sent]
+    assert order == list(range(20)), f"帧序乱了: {order}"
+
+
+@pytest.mark.asyncio
+async def test_broadcast_returns_without_waiting_on_socket():
+    """广播路径一律不 await socket：卡死的连接也不该让广播变慢"""
+    m = ConnectionManager()
+    await m.connect(StalledWS(), GAME)
+    started = time.perf_counter()
+    for i in range(10):
+        await m.broadcast(GAME, _thinking(i))
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.05, f"广播被 socket 拖慢了 {elapsed:.3f}s"
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,73 @@ TICK_INTERVAL = 0.05
 # 其余类型都带独有信息（AI_THINKING 带 player_id、ERROR 带原因），合并就是丢信息。
 COALESCIBLE = frozenset({WebSocketOpCode.STATE_UPDATE})
 
+# 每条连接的写缓冲上限（帧数）。超过即判定为慢消费者，主动断开。
+# 取 32：配合 50ms 合并窗口，32 帧约等于 1.6s 的积压量。偶发网络抖动填不满，
+# 能填满说明客户端真的跟不上了（或者根本不读了）。
+SEND_QUEUE_MAX = 32
+
+
+class _Conn:
+    """一条连接 + 它自己的写缓冲和写协程。
+
+    为什么每条连接要单独一个队列和协程：原来的写法是在广播循环里逐个
+    `await ws.send_text()`。客户端不读数据时 TCP 窗口会填满，那个 await 就会挂住，
+    **整个房间的广播卡在这一个慢客户端上**（队头阻塞）。
+    改成"广播只往队列里塞、写协程负责真正发出去"，广播路径就再也不会等socket。
+    """
+
+    __slots__ = ("ws", "game_id", "queue", "task", "dropped")
+
+    def __init__(self, ws: WebSocket, game_id: str):
+        self.ws = ws
+        self.game_id = game_id
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=SEND_QUEUE_MAX)
+        self.task: Optional[asyncio.Task] = None
+        self.dropped = False
+
+    async def offer(self, msg_json: str) -> bool:
+        """入队，返回 False 表示这条连接真的跟不上了。
+
+        满了不能立刻判死刑：**某一瞬间缓冲是满的，不代表消费者慢**。
+        广播循环里连续塞几十帧时中间没有任何真正的挂起点，写协程根本没被调度过，
+        缓冲自然是满的——这时判死会把健康连接一起误杀（实测 96 帧全部误杀）。
+        所以先让出一次事件循环给写协程一个排水的机会，再试一次：
+          - 消费者健康：写协程这一让就把队列抽空了，第二次入队成功
+          - 消费者卡死：写协程正挂在 send 上，让也没用，第二次仍失败 → 判定为慢消费者
+        `sleep(0)` 只等一个事件循环 tick，不依赖任何 socket，不会把队头阻塞放回来。
+        """
+        try:
+            self.queue.put_nowait(msg_json)
+            return True
+        except asyncio.QueueFull:
+            pass
+        await asyncio.sleep(0)
+        try:
+            self.queue.put_nowait(msg_json)
+            return True
+        except asyncio.QueueFull:
+            return False
+
+    async def _writer(self) -> None:
+        """单协程顺序发送：保证同一连接上的帧序与入队顺序一致"""
+        while True:
+            msg_json = await self.queue.get()
+            try:
+                await self.ws.send_text(msg_json)
+            except Exception:
+                # 发送失败基本等于连接已断，退出写协程，清理交给 disconnect
+                self.queue.task_done()
+                return
+            self.queue.task_done()
+
+    def start(self) -> None:
+        self.task = asyncio.create_task(self._writer())
+
+    def stop(self) -> None:
+        if self.task:
+            self.task.cancel()
+            self.task = None
+
 # 房间 → 持有其连接的节点集合
 ROOM_NODES_KEY = "aivalon:ws:rooms:{game_id}"
 # 节点专属广播频道
@@ -41,9 +108,10 @@ ROOM_NODES_TTL = 3600
 
 class ConnectionManager:
     def __init__(self):
-        # 存储格式: {game_id: [websocket1, websocket2, ...]}
-        # 也可以考虑更细粒度: {game_id: {user_id: websocket}} 以便定向发送
-        self.active_connections: Dict[str, List[WebSocket]] = {}
+        # 存储格式: {game_id: [_Conn, _Conn, ...]}
+        # 存的是 _Conn 而不是裸 WebSocket：每条连接要带自己的写缓冲，
+        # 否则一个慢客户端会卡住整个房间的广播
+        self.active_connections: Dict[str, List["_Conn"]] = {}
         self._redis = None
         self._node_id: Optional[str] = None
         self._sub_task: Optional[asyncio.Task] = None
@@ -77,7 +145,9 @@ class ConnectionManager:
         first_on_this_node = game_id not in self.active_connections
         if first_on_this_node:
             self.active_connections[game_id] = []
-        self.active_connections[game_id].append(websocket)
+        conn = _Conn(websocket, game_id)
+        conn.start()
+        self.active_connections[game_id].append(conn)
 
         # 只在本节点第一条连接时登记：路由表记的是"节点"粒度，不是"连接"粒度
         if first_on_this_node and self.clustered:
@@ -93,11 +163,50 @@ class ConnectionManager:
     def disconnect(self, websocket: WebSocket, game_id: str):
         """同步方法（WebSocketDisconnect 的处理路径上不便 await），
         路由表摘除交给 unregister_if_empty。"""
-        if game_id in self.active_connections:
-            if websocket in self.active_connections[game_id]:
-                self.active_connections[game_id].remove(websocket)
-            if not self.active_connections[game_id]:
-                del self.active_connections[game_id]
+        conns = self.active_connections.get(game_id)
+        if conns is None:
+            return
+        for conn in list(conns):
+            if conn.ws is websocket:
+                conn.stop()          # 写协程必须停，否则连接没了协程还挂在那儿
+                conns.remove(conn)
+        if not conns:
+            del self.active_connections[game_id]
+
+    def _drop(self, conn: "_Conn") -> None:
+        """摘掉一条连接并异步关闭它。
+
+        关闭动作丢进后台 Task 而不是在这里 await：慢消费者的 socket 本来就写不动，
+        await 它的 close 等于把广播路径重新卡回去——那就白做背压了。
+        """
+        conn.stop()
+        conns = self.active_connections.get(conn.game_id)
+        if conns and conn in conns:
+            conns.remove(conn)
+            if not conns:
+                del self.active_connections[conn.game_id]
+        asyncio.create_task(self._close_quietly(conn))
+
+    async def _drain_all(self, timeout: float = 1.0) -> None:
+        """等所有写缓冲排空，最多等 timeout。
+
+        必须有超时：慢消费者的队列永远排不空，无限等会把整个进程的退出流程挂住。
+        """
+        waits = [c.queue.join()
+                 for conns in self.active_connections.values() for c in conns]
+        if not waits:
+            return
+        try:
+            await asyncio.wait_for(asyncio.gather(*waits), timeout=timeout)
+        except Exception:
+            pass
+
+    @staticmethod
+    async def _close_quietly(conn: "_Conn") -> None:
+        try:
+            await conn.ws.close(code=1013)   # 1013 Try Again Later：告诉客户端可以重连
+        except Exception:
+            pass
 
     async def unregister_if_empty(self, game_id: str) -> None:
         """本节点已无该房间连接时，从路由表摘掉自己。
@@ -161,15 +270,25 @@ class ConnectionManager:
             await self._fanout_remote(game_id, msg_json)
 
     async def _send_local(self, game_id: str, msg_json: str) -> None:
-        if game_id not in self.active_connections:
+        """只往各连接的写缓冲里塞，不等 socket。
+
+        这里一律非阻塞：广播路径上一旦 await 某条 socket，那条连接读得慢就会
+        拖住整个房间（队头阻塞）。真正的发送由每条连接自己的写协程负责。
+        """
+        conns = self.active_connections.get(game_id)
+        if not conns:
             return
-        # 复制列表进行迭代，防止发送过程中连接断开导致修改列表报错
-        for connection in list(self.active_connections[game_id]):
-            try:
-                await connection.send_text(msg_json)
-            except Exception:
-                # 发送失败通常意味着连接已断开，可以在这里处理，或者依赖 disconnect 回调
-                pass
+        # 复制列表进行迭代：慢消费者会在循环里被摘掉，边遍历边改会漏元素
+        for conn in list(conns):
+            if await conn.offer(msg_json):
+                continue
+            # 缓冲塞满 = 客户端跟不上或根本不读了。留着它只会一直吃内存，
+            # 而且它永远追不上——积压的帧本身就已经是过期状态。直接断开，
+            # 让客户端重连后一次拉到最新状态，比慢慢补一堆旧帧更快也更省。
+            conn.dropped = True
+            metrics.ws_slow_consumers_dropped.inc()
+            logger.warning("慢消费者断开: game=%s 写缓冲积压超过 %d 帧", game_id, SEND_QUEUE_MAX)
+            self._drop(conn)
 
     async def _fanout_remote(self, game_id: str, msg_json: str) -> None:
         """查路由表，只发给持有该房间连接的其他节点。
@@ -283,6 +402,13 @@ class ConnectionManager:
                 await self._flush(game_id)
             except Exception:
                 pass
+        # 给写协程一次把队列排空的机会：上面 flush 只是把帧塞进了缓冲，
+        # 真正发出去是写协程的事，直接 cancel 等于白 flush 一场
+        await self._drain_all()
+        # 再停掉所有写协程，否则进程退出时它们还挂在 queue.get() 上
+        for conns in self.active_connections.values():
+            for conn in conns:
+                conn.stop()
         if self._sub_task:
             self._sub_task.cancel()
             self._sub_task = None
