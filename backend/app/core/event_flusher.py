@@ -8,12 +8,14 @@ import asyncio
 import json
 import logging
 
+from sqlalchemy import create_engine
 from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import func
 
 from app.core import event_journal
 from app.core.redis import get_new_redis_client
-from app.db.base import SessionLocal
+from app.db.base import SQLALCHEMY_DATABASE_URL
 from app.models.game import Game as GameModel, GameEvent as GameEventModel
 from app.models.outbox import OutboxEvent
 
@@ -22,14 +24,40 @@ logger = logging.getLogger("aivalon.flusher")
 FLUSH_INTERVAL = 0.2      # 刷库间隔（秒）：RPO 与 MySQL 写压力的平衡点
 FLUSH_BATCH_SIZE = 500    # 单次最多刷多少条
 
+# 独立引擎 + 单连接池：后台刷库是常驻写者，不与前台请求路径共享连接池（舱壁隔离），
+# 避免大批量刷库事务占满共享池导致请求路径拿不到连接（S2 复测创建对局 90s 超时的根因之一）。
+_flush_engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    pool_size=1,
+    max_overflow=0,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    isolation_level="READ COMMITTED",
+)
+FlushSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_flush_engine)
+
 
 def _flush_batch(entries: list) -> None:
     """同步批量落库（在线程池里执行）。entries: [(entry_id, fields), ...]"""
-    db = SessionLocal()
+    db = FlushSessionLocal()
     try:
         for entry_id, fields in entries:
             payload = json.loads(fields.get("payload", "{}"))
             player_id = int(fields["player_id"]) if fields.get("player_id") else None
+
+            # 开局事件：先补建 games 表记录（创建路径已移出 MySQL 热路径）。
+            # 顺序要紧：game_events.game_id 有外键指向 games.id，若先插事件行，
+            # 外键校验失败会被 INSERT IGNORE 降级成 warning 静默丢弃——GAME_START
+            # 就此永久丢失（全库 372 局零条 GAME_START，见 DEVLOG 013）。
+            if fields.get("event_type") == "GAME_START":
+                stmt = mysql_insert(GameModel).prefix_with("IGNORE").values(
+                    id=fields["game_id"],
+                    status="playing",
+                    player_ids=payload.get("player_ids", []),
+                    winner=None,
+                    user_id=payload.get("creator_id"),
+                )
+                db.execute(stmt)
 
             # 事件表：INSERT IGNORE 幂等（崩溃重刷不产生重复行）
             stmt = mysql_insert(GameEventModel).prefix_with("IGNORE").values(
