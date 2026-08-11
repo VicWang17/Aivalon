@@ -10,7 +10,9 @@
 # 连接的那几个节点（而不是 Pub/Sub 广播给全集群——那样每个节点都要收下并丢弃与自己
 # 无关的消息，节点越多浪费越大）。每个节点订阅自己的专属频道。
 from typing import Dict, List, Optional
+from enum import Enum
 import asyncio
+import json
 import logging
 from fastapi import WebSocket
 from app.core import metrics
@@ -35,6 +37,19 @@ COALESCIBLE = frozenset({WebSocketOpCode.STATE_UPDATE})
 # 能填满说明客户端真的跟不上了（或者根本不读了）。
 SEND_QUEUE_MAX = 32
 
+# 旁观者聚合窗口（秒）。比玩家的合并窗口大一个量级：
+# 旁观者不参与决策，晚半秒看到与即时看到体验上没有区别，而帧数能压下去一个数量级。
+SPECTATOR_BATCH_INTERVAL = 0.5
+# 单个聚合帧最多装多少条。超了丢最旧的——旁观者要的是跟上进度，不是逐帧回放。
+SPECTATOR_BATCH_MAX = 64
+
+
+class Tier(str, Enum):
+    """推送分级。决定一条连接以什么节奏收消息，与它能看到什么无关（脱敏是另一回事）。"""
+
+    PLAYER = "player"        # 房间成员：即时收，走 50ms 合并窗口
+    SPECTATOR = "spectator"  # 旁观者：聚合批量收，走 500ms 窗口
+
 
 class _Conn:
     """一条连接 + 它自己的写缓冲和写协程。
@@ -45,14 +60,59 @@ class _Conn:
     改成"广播只往队列里塞、写协程负责真正发出去"，广播路径就再也不会等socket。
     """
 
-    __slots__ = ("ws", "game_id", "queue", "task", "dropped")
+    __slots__ = ("ws", "game_id", "user_id", "tier", "queue", "task", "dropped",
+                 "_batch", "_batch_task")
 
-    def __init__(self, ws: WebSocket, game_id: str):
+    def __init__(self, ws: WebSocket, game_id: str,
+                 user_id: Optional[int] = None, tier: "Tier" = None):
         self.ws = ws
         self.game_id = game_id
+        # 单播用：定向发给操作者本人时按它筛选
+        self.user_id = user_id
+        self.tier = tier or Tier.PLAYER
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=SEND_QUEUE_MAX)
         self.task: Optional[asyncio.Task] = None
         self.dropped = False
+        # 旁观者聚合缓冲：攒够一窗口再打成一个 BATCH 帧
+        self._batch: List[str] = []
+        self._batch_task: Optional[asyncio.Task] = None
+
+    # ---- 旁观者聚合 ----
+
+    def accepts_now(self) -> bool:
+        """这条连接是否即时收帧。旁观者走自己的聚合窗口，不即时收。"""
+        return self.tier is not Tier.SPECTATOR
+
+    def add_to_batch(self, msg_json: str) -> None:
+        """塞进聚合缓冲。超上限丢最旧的——旁观者要的是跟上进度，不是逐帧回放。"""
+        self._batch.append(msg_json)
+        if len(self._batch) > SPECTATOR_BATCH_MAX:
+            dropped = len(self._batch) - SPECTATOR_BATCH_MAX
+            del self._batch[:dropped]
+            metrics.ws_frames_merged.inc(dropped)
+        if self._batch_task is None:
+            self._batch_task = asyncio.create_task(self._batch_timer())
+
+    async def _batch_timer(self) -> None:
+        try:
+            await asyncio.sleep(SPECTATOR_BATCH_INTERVAL)
+        except asyncio.CancelledError:
+            return
+        # 同 _tick：先注销自己再发，否则 flush 期间新来的帧等不到下一个定时器
+        self._batch_task = None
+        await self.flush_batch()
+
+    async def flush_batch(self) -> Optional[str]:
+        """把缓冲打成一个 BATCH 帧入队。返回入队的 json，空缓冲返回 None。"""
+        if not self._batch:
+            return None
+        frames, self._batch = self._batch, []
+        # 装的是已序列化的原始帧，这里不再重新解析——旁观者客户端按 frames 顺序回放即可
+        envelope = json.dumps(
+            {"type": WebSocketOpCode.BATCH.value, "payload": {"frames": frames}})
+        metrics.ws_frames_sent.inc()
+        await self.offer(envelope)
+        return envelope
 
     async def offer(self, msg_json: str) -> bool:
         """入队，返回 False 表示这条连接真的跟不上了。
@@ -96,6 +156,9 @@ class _Conn:
         if self.task:
             self.task.cancel()
             self.task = None
+        if self._batch_task:
+            self._batch_task.cancel()
+            self._batch_task = None
 
 # 房间 → 持有其连接的节点集合
 ROOM_NODES_KEY = "aivalon:ws:rooms:{game_id}"
@@ -140,12 +203,13 @@ class ConnectionManager:
     # 连接生命周期
     # ------------------------------------------------------------------
 
-    async def connect(self, websocket: WebSocket, game_id: str):
+    async def connect(self, websocket: WebSocket, game_id: str,
+                      user_id: Optional[int] = None, tier: "Tier" = None):
         await websocket.accept()
         first_on_this_node = game_id not in self.active_connections
         if first_on_this_node:
             self.active_connections[game_id] = []
-        conn = _Conn(websocket, game_id)
+        conn = _Conn(websocket, game_id, user_id=user_id, tier=tier)
         conn.start()
         self.active_connections[game_id].append(conn)
 
@@ -263,13 +327,26 @@ class ConnectionManager:
         if msg_json is not None:
             await self._dispatch(game_id, msg_json)
 
-    async def _dispatch(self, game_id: str, msg_json: str) -> None:
-        metrics.ws_frames_sent.inc()
-        await self._send_local(game_id, msg_json)
-        if self.clustered:
-            await self._fanout_remote(game_id, msg_json)
+    async def unicast(self, game_id: str, user_id: int, message: WSMessage) -> None:
+        """只发给房间里的某一个人（操作者单播）。
 
-    async def _send_local(self, game_id: str, msg_json: str) -> None:
+        为什么单播也要走跨节点通道：操作者的连接不一定在处理动作的那个节点上
+        （同 E-1 那个漏洞），所以照样得查路由表定向投递，
+        只是消息到了目标节点之后再按 user_id 筛出那一条连接。
+        单播不进合并窗口——"轮到你操作了"这种消息合并掉就是丢信息。
+        """
+        msg_json = message.model_dump_json()
+        await self._dispatch(game_id, msg_json, target=user_id)
+
+    async def _dispatch(self, game_id: str, msg_json: str,
+                        target: Optional[int] = None) -> None:
+        metrics.ws_frames_sent.inc()
+        await self._send_local(game_id, msg_json, target=target)
+        if self.clustered:
+            await self._fanout_remote(game_id, msg_json, target=target)
+
+    async def _send_local(self, game_id: str, msg_json: str,
+                          target: Optional[int] = None) -> None:
         """只往各连接的写缓冲里塞，不等 socket。
 
         这里一律非阻塞：广播路径上一旦 await 某条 socket，那条连接读得慢就会
@@ -280,6 +357,13 @@ class ConnectionManager:
             return
         # 复制列表进行迭代：慢消费者会在循环里被摘掉，边遍历边改会漏元素
         for conn in list(conns):
+            # 单播：只发给指定的人
+            if target is not None and conn.user_id != target:
+                continue
+            # 旁观者不即时收，先攒进它自己的聚合缓冲，到窗口才打成一个 BATCH 帧
+            if not conn.accepts_now():
+                conn.add_to_batch(msg_json)
+                continue
             if await conn.offer(msg_json):
                 continue
             # 缓冲塞满 = 客户端跟不上或根本不读了。留着它只会一直吃内存，
@@ -290,7 +374,8 @@ class ConnectionManager:
             logger.warning("慢消费者断开: game=%s 写缓冲积压超过 %d 帧", game_id, SEND_QUEUE_MAX)
             self._drop(conn)
 
-    async def _fanout_remote(self, game_id: str, msg_json: str) -> None:
+    async def _fanout_remote(self, game_id: str, msg_json: str,
+                             target: Optional[int] = None) -> None:
         """查路由表，只发给持有该房间连接的其他节点。
         本节点已在 _send_local 直发过，不再经 Redis 绕一圈——省一次往返，
         也让"Redis 挂了本地广播还能用"成立。"""
@@ -311,14 +396,16 @@ class ConnectionManager:
         # 两种错误的代价完全不对等，所以宁可多发。
         # 崩溃节点的残留表项靠 key TTL 兜底（见 connect），且一个房间的成员数天然
         # 被集群规模封顶，不会无限增长。
+        # 线格式：game_id \n 单播目标(空=广播) \n 消息体。
+        # 用行分隔而不是再套一层 JSON：msg_json 本身已是 JSON，套壳等于双重编码，
+        # 每跳都要多一次解析和转义。
+        envelope = f"{game_id}\n{target if target is not None else ''}\n{msg_json}"
         for node_id in targets:
             try:
                 await self._redis.publish(
-                    NODE_CHANNEL_KEY.format(node_id=node_id),
-                    f"{game_id}\n{msg_json}",
-                )
+                    NODE_CHANNEL_KEY.format(node_id=node_id), envelope)
             except Exception as e:
-                logger.warning("跨节点扇出失败: game=%s target=%s %s", game_id, node_id, e)
+                logger.warning("跨节点扇出失败: game=%s node=%s %s", game_id, node_id, e)
 
     async def broadcast_game_update(self, game_id: str, game_state: object):
         """
@@ -361,9 +448,12 @@ class ConnectionManager:
                     if raw.get("type") != "message":
                         continue
                     data = raw.get("data") or ""
-                    game_id, _, msg_json = data.partition("\n")
-                    if msg_json:
-                        await self._send_local(game_id, msg_json)
+                    parts = data.split("\n", 2)
+                    if len(parts) != 3 or not parts[2]:
+                        continue
+                    game_id, target_raw, msg_json = parts
+                    target = int(target_raw) if target_raw else None
+                    await self._send_local(game_id, msg_json, target=target)
             except asyncio.CancelledError:
                 raise
             except Exception as e:

@@ -4,7 +4,7 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query, status, HTTPException
 from jose import jwt, JWTError
 
-from app.core.socket_manager import manager
+from app.core.socket_manager import manager, Tier
 from app.db.base import SessionLocal
 from app.core.config import settings
 from app.models.user import User
@@ -53,8 +53,21 @@ async def websocket_endpoint(
     游戏实时对局 WebSocket 接口
     连接地址: /api/v1/ws/games/{game_id}?token={jwt_token}
     """
-    # 接受连接
-    await manager.connect(websocket, game_id)
+    # 分级推送：有座位的是玩家（即时收帧），没座位的是旁观者（聚合批量收）。
+    # 判据用"是否占座"而不是让客户端自己声明角色——否则任何人都能声明成玩家，
+    # 把本该聚合的流量提成即时流量。
+    tier = Tier.SPECTATOR
+    try:
+        from app.services.game_service import GameService
+
+        game = await GameService.load_game(game_id)
+        if game and any(p.user_id == user.id for p in game.players):
+            tier = Tier.PLAYER
+    except Exception:
+        # 查不到房间不该挡住连接（可能刚建局还没落地），按旁观者接进来即可
+        pass
+
+    await manager.connect(websocket, game_id, user_id=user.id, tier=tier)
     
     try:
         while True:

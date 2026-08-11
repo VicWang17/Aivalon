@@ -273,6 +273,91 @@ async def test_broadcast_returns_without_waiting_on_socket():
     assert elapsed < 0.05, f"广播被 socket 拖慢了 {elapsed:.3f}s"
 
 
+SPEC_TICK = socket_manager.SPECTATOR_BATCH_INTERVAL + 0.15
+
+
+@pytest.mark.asyncio
+async def test_spectator_gets_one_batch_frame_instead_of_many():
+    """旁观者聚合批量：一个窗口内的多帧打成一个 BATCH 帧下发。
+
+    旁观者不参与决策，晚半秒看到与即时看到体验上没区别，而帧数能压下一个数量级。
+    """
+    m = ConnectionManager()
+    ws = FakeWS()
+    await m.connect(ws, GAME, user_id=9, tier=socket_manager.Tier.SPECTATOR)
+    for i in range(10):
+        await m.broadcast(GAME, _thinking(i))
+    await asyncio.sleep(0.05)
+    assert ws.sent == [], "旁观者不该即时收帧"
+    await asyncio.sleep(SPEC_TICK)
+    assert len(ws.sent) == 1, f"10 帧没聚合成 1 帧，实收 {len(ws.sent)}"
+    env = json.loads(ws.sent[0])
+    assert env["type"] == "batch"
+    assert len(env["payload"]["frames"]) == 10, "聚合帧里应装齐 10 条原始消息"
+
+
+@pytest.mark.asyncio
+async def test_player_is_not_delayed_by_spectator_batching():
+    """同房间里玩家照旧即时收，不会被旁观者的聚合窗口拖慢"""
+    m = ConnectionManager()
+    player, spectator = FakeWS(), FakeWS()
+    await m.connect(player, GAME, user_id=1, tier=socket_manager.Tier.PLAYER)
+    await m.connect(spectator, GAME, user_id=2, tier=socket_manager.Tier.SPECTATOR)
+    await m.broadcast(GAME, _thinking(1))
+    await asyncio.sleep(0.05)
+    assert len(player.sent) == 1, "玩家被旁观者的窗口拖慢了"
+    assert spectator.sent == []
+
+
+@pytest.mark.asyncio
+async def test_spectator_batch_drops_oldest_when_over_cap():
+    """聚合缓冲超上限丢最旧的：旁观者要的是跟上进度，不是逐帧回放"""
+    m = ConnectionManager()
+    ws = FakeWS()
+    await m.connect(ws, GAME, user_id=9, tier=socket_manager.Tier.SPECTATOR)
+    over = socket_manager.SPECTATOR_BATCH_MAX + 20
+    for i in range(over):
+        await m.broadcast(GAME, _thinking(i))
+    await asyncio.sleep(SPEC_TICK)
+    frames = json.loads(ws.sent[0])["payload"]["frames"]
+    assert len(frames) == socket_manager.SPECTATOR_BATCH_MAX
+    # 留下的应该是最新的那一批，最旧的被丢掉
+    first_kept = json.loads(frames[0])["payload"]["player_id"]
+    assert first_kept == over - socket_manager.SPECTATOR_BATCH_MAX, \
+        f"丢的不是最旧的，留下的第一帧是 {first_kept}"
+
+
+@pytest.mark.asyncio
+async def test_unicast_reaches_only_the_target():
+    """操作者单播：只有目标那条连接收到"""
+    m = ConnectionManager()
+    a, b = FakeWS(), FakeWS()
+    await m.connect(a, GAME, user_id=1)
+    await m.connect(b, GAME, user_id=2)
+    await m.unicast(GAME, 1, _thinking(1))
+    await asyncio.sleep(0.05)
+    assert len(a.sent) == 1, "目标没收到"
+    assert b.sent == [], "单播漏给了别人"
+
+
+@pytest.mark.asyncio
+async def test_unicast_crosses_nodes(redis):
+    """单播也得走跨节点通道：操作者的连接不一定在处理动作的那个节点上（同 E-1 的漏洞）"""
+    a = await _mk(redis, "node-a")
+    b = await _mk(redis, "node-b")
+    try:
+        target, other = FakeWS(), FakeWS()
+        await a.connect(target, GAME, user_id=1)
+        await a.connect(other, GAME, user_id=2)
+        await b.unicast(GAME, 1, _thinking(1))      # 从 B 发，连接都在 A
+        await asyncio.sleep(0.25)
+        assert len(target.sent) == 1, "跨节点单播没送达"
+        assert other.sent == [], "跨节点单播漏给了别人"
+    finally:
+        await a.stop()
+        await b.stop()
+
+
 @pytest.mark.asyncio
 async def test_connect_registers_node_in_routing_table(redis):
     m = await _mk(redis, "node-a")

@@ -18,6 +18,7 @@ class WebSocketOpCode(str, Enum):
     AI_THINKING = "ai_thinking"     # AI 思考中
     ERROR = "error"                 # 错误通知
     PONG = "pong"                   # 心跳响应
+    BATCH = "batch"                 # 聚合帧：payload.frames 是若干条原始消息（旁观者用）
 
 class WSMessage(BaseModel):
     """
