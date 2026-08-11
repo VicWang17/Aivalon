@@ -13,22 +13,26 @@ async def override_get_redis():
     return mock
 
 # Mock DB
-def override_get_db():
+def make_mock_db():
+    """构造一个假 Session：db.query(...).filter(...).first() 固定返回 testuser"""
     db = MagicMock()
-    
+
     from datetime import datetime
     # Mock get_password_hash to avoid bcrypt issues in test env
     # user = User(id=1, username="testuser", email="test@example.com", hashed_password=get_password_hash("password123"), is_active=True)
     user = User(id=1, username="testuser", email="test@example.com", hashed_password="hashed_password_123", is_active=True, created_at=datetime.utcnow())
-    
+
     # Setup mock
     query_mock = MagicMock()
     db.query.return_value = query_mock
     filter_mock = MagicMock()
     query_mock.filter.return_value = filter_mock
     filter_mock.first.return_value = user
-    
-    yield db
+
+    return db
+
+def override_get_db():
+    yield make_mock_db()
 
 # Mock verify_password to match our fake hash
 def override_verify_password(plain, hashed):
@@ -37,6 +41,11 @@ def override_verify_password(plain, hashed):
 # Patch the function where it is USED, not just where it is defined
 from app.routers import auth
 auth.verify_password = override_verify_password
+
+# get_current_user 不再走 get_db 依赖（它手动开短生命周期 Session，见 DEVLOG 012），
+# 所以 dependency_overrides 盖不住它——必须在使用处替掉 SessionLocal。
+from app.core import deps
+deps.SessionLocal = make_mock_db
 
 app.dependency_overrides[get_redis] = override_get_redis
 app.dependency_overrides[get_db] = override_get_db

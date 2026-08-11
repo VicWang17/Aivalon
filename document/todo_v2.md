@@ -7,20 +7,34 @@
 
 ---
 
-## 🔄 交接状态（2026-08-11，换机/换 AI 续做必读）
+## 🔄 交接状态（2026-08-11 晚，换机/换 AI 续做必读）
 
-**当前位置**：D 组（热路径重构）进行到 D-2 Write-Behind，代码完成但未最终验证。
+**当前位置**：D 组 D-2 Write-Behind 收尾。**30s 超时墙已闭环**（DEVLOG 012），剩 kill 演练 + 写压力量化两项。
 
 **已完成**：A 组（可观测）、B 组（压测平台 + v1 基线报告）、C 组（测试安全网 24 项）、D-1（房间 Actor 去锁）、D-2 代码（Write-Behind：事件先入 Redis Stream + 快照一个事务，flusher 每 200ms 批量刷 MySQL）。
 
 **D-2 验证状态（未闭合，接手先做）**：
 - ✅ 24 项测试全绿（含全对局集成测试，走的就是新 Write-Behind 链路）
 - ✅ 动作处理主体实测 ~2ms（深拷贝 0.2 + journal 1.5）；空载动作 7~13ms（基线 18~25ms）
-- ⚠️ **20 并发房间复测结果不稳定**：一次出现创建对局 90s 超时（QueuePool 打满），最近一轮（1921 请求）P50 7ms / P99 110ms / 仅 1 次 500（DEVLOG 005 竞态家族）。需要**干净环境复跑 2~3 轮 20 房间**确认稳定性，若创建超时复现则排查 flusher 与连接池的相互影响
 - ❌ kill 恢复演练未做（kill uvicorn → 重启 → 对局从 Redis 快照恢复继续打）
 - ❌ MySQL 写压力下降比例未量化（简历"写压力 -80%"需要这个数字）
+- ✅ **30s 超时墙已闭环（2026-08-11 16:00，DEVLOG 012）**。真凶不是原假设的 Actor future 悬挂泄漏，而是**"持有并等待"自死锁**：`get_current_user` 用 `Depends(get_db)`（连接持有到请求结束）+ 下游 `_load_user_map` 再取第二个连接 → 单请求持有 2 个连接 → 15 个鉴权连接占满池后集体等第二个连接，池永不恢复。**这个 bug 由 011 的修复引入**（把复用 db 的查询抽成独立 Session，单请求持有数 1→2）
+  - 定位手段：新增连接池探针 `app/core/pool_probe.py`（checkout 时记 trace_id + 调用栈，报告持有超阈值未还的连接），`DB_POOL_PROBE=true` 开启，默认关闭
+  - 修法：`get_current_user` 改手动短生命周期 Session（与 `get_ws_user` 同一招，DEVLOG 006 当时只改了 WS 路径）
+  - 验证：两轮干净复测 `s2_u20_fix_r1/r2`，共 9536 请求**零失败**（修复前 25.76% 创建失败）；创建 max 30281ms → 226ms/160ms；吞吐 29.74 → 40.21 rps；探针零告警
+  - 遗留（不在本步范围）：`auth.py` 的 `register` 是 `async def` 里做同步 `db.query`（011 修过的同类事件循环阻塞），但不在 S2 热路径上，未改
+- ⚠️ **以下为 011 的历史记录（三处缺陷已修，但当时未根除）**：
+  1. ✅ `restore_game_state` 连接泄漏（`finally` 里 `if not db` 在重新赋值后恒假，每次房间唤醒漏 1 连接）——已修（`own_session` 标志）
+  2. ✅ 事件循环冻结（`get_current_user`/`create_game` 是 async def 却做同步 db.query，等池连接时冻结全服务）——已修（auth 改同步 def 走线程池；创建路径用户名查询改 `asyncio.to_thread` + 短 Session）
+  3. ✅ flusher 与前台共享连接池——已隔离（独立引擎 + 单连接池）
+  4. ❌ **池仍会被占满**：修复后 46 次创建 13 次 500，P66+ 卡整齐的 30000ms（池等待 30s 超时），报错点为 `get_current_user` 等连接。**关键证据**：MySQL processlist 显示所有连接 `Sleep` 空闲——连接是被**签出后闲置持有**的（僵尸请求），不是 MySQL 慢
+  - **当前假设**：`get_db` Session 从鉴权查询起签出、持有到请求结束；若请求卡在永不返回的 await（如 Actor `submit` 的 future 在 Actor 任务异常退出后永久悬挂），连接永久泄漏，攒够 15 个池即死
+  - **下一步**：给 SQLAlchemy 池开 checkout/checkin 日志或加 pool 状态探针，复现 20 房间场景，抓"谁签出未还"；顺带检查 `room_actor.py` 的 future 在 Actor 任务死亡路径上是否一定会被 set_exception
+- ⚠️ **机器口径变更**：基线报告在 Intel i7-9750H 上测得，当前为 Apple Silicon——绝对延迟跨机不可比，I 组回填简历数字时需在新机重跑全量回归或注明口径
+- 另修：`PlayerState` 补 `is_connected` 字段（结算时 stats 任务 payload 访问它抛 AttributeError，导致每局收尾动作 500、统计任务从未触发）；alembic `bd13848a4a56` 迁移加判存在（全新库可重复）；fastapi 锁 `>=0.128,<0.129`；补 `pytest-asyncio` 显式依赖
+- 环境注意：celery worker / uvicorn 日志量大，后台运行必须重定向到 `logs/`（任务系统 16MiB 输出上限会杀进程）；`logs/` 已 gitignore
 
-**接手第一步（D-2 收尾）**：干净环境（单 uvicorn 实例！见 DEVLOG 008）跑 `locust -f ../bench/locust_s2.py --headless -u 20 -r 20 -t 120s` 两轮确认稳定 → kill 演练 → 量化写压力 → 提交 → 走 D-3。
+**接手第一步（D-2 收尾）**：先定位并修复上面的连接池占满 bug → 干净环境（单 uvicorn 实例！见 DEVLOG 008）跑 `locust -f ../bench/locust_s2.py --headless -u 20 -r 20 -t 120s` 两轮确认稳定 → kill 演练 → 量化写压力 → 提交 → 走 D-3。
 
 **环境启动**（bench 配置）：
 ```bash
