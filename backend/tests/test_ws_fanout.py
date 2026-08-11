@@ -20,6 +20,8 @@ from app.schemas.protocol import WSMessage, WebSocketOpCode
 TEST_ROOM_KEY = "aivalon:test:ws:rooms:{game_id}"
 TEST_CHAN_KEY = "aivalon:test:ws:node:{node_id}"
 GAME = "game-fanout-1"
+# 等合并窗口过去的时长，取窗口的两倍留余量
+TICK = socket_manager.TICK_INTERVAL * 2
 
 
 def _redis_ok() -> bool:
@@ -83,7 +85,98 @@ async def test_single_node_broadcast_never_touches_redis():
     await m.connect(ws, GAME)
     assert not m.clustered
     await m.broadcast(GAME, _msg("hello"))
+    await asyncio.sleep(TICK)        # STATE_UPDATE 走合并窗口，不是立即下发
     assert len(ws.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_same_tick_state_updates_merge_into_one_frame():
+    """同 Tick 合并帧：窗口内多个 STATE_UPDATE 只下发最后一帧。
+
+    一次人类动作会触发 AI 连锁推进，短时间内产生多个状态更新。STATE_UPDATE 的
+    payload 只是"去拉最新状态"的通知，中间帧对客户端没有信息量，全发等于白烧带宽。
+    """
+    m = ConnectionManager()
+    ws = FakeWS()
+    await m.connect(ws, GAME)
+    for i in range(5):
+        await m.broadcast(GAME, _msg(f"tick-{i}"))
+    assert ws.sent == [], "合并窗口内不该有任何下发"
+    await asyncio.sleep(TICK)
+    assert len(ws.sent) == 1, f"5 帧没合成 1 帧，实收 {len(ws.sent)}"
+    assert "tick-4" in ws.sent[0], "下发的应该是最后一帧，不是第一帧"
+
+
+@pytest.mark.asyncio
+async def test_frames_in_different_windows_are_not_merged():
+    """窗口关闭后要能重新开窗。
+
+    定时器注销与 flush 的顺序写错（先 flush 后注销）会让 flush 期间新来的帧
+    挂在 _pending 里等不到任何定时器，表现是"最后一次状态更新永远不下发"。
+    """
+    m = ConnectionManager()
+    ws = FakeWS()
+    await m.connect(ws, GAME)
+    await m.broadcast(GAME, _msg("first"))
+    await asyncio.sleep(TICK)
+    await m.broadcast(GAME, _msg("second"))
+    await asyncio.sleep(TICK)
+    assert len(ws.sent) == 2, f"跨窗口的两帧不该合并，实收 {len(ws.sent)}"
+
+
+@pytest.mark.asyncio
+async def test_non_coalescible_message_is_sent_immediately():
+    """AI_THINKING 带具体 player_id，合并会丢信息，必须立即下发"""
+    m = ConnectionManager()
+    ws = FakeWS()
+    await m.connect(ws, GAME)
+    msg = WSMessage(type=WebSocketOpCode.AI_THINKING, payload={"player_id": 3})
+    await m.broadcast(GAME, msg)
+    assert len(ws.sent) == 1, "不可合并的帧不该被压进窗口"
+
+
+@pytest.mark.asyncio
+async def test_immediate_frame_does_not_overtake_pending_frame():
+    """立即帧不能越过挂起帧：否则客户端先收到"AI 在思考"再收到上一次状态更新，顺序反了"""
+    m = ConnectionManager()
+    ws = FakeWS()
+    await m.connect(ws, GAME)
+    await m.broadcast(GAME, _msg("state-first"))          # 进窗口挂起
+    await m.broadcast(GAME, WSMessage(
+        type=WebSocketOpCode.AI_THINKING, payload={"player_id": 1}))
+    assert len(ws.sent) == 2, f"实收 {len(ws.sent)} 帧"
+    assert "state-first" in ws.sent[0], "挂起帧应该先被冲出去"
+    assert "player_id" in ws.sent[1]
+
+
+@pytest.mark.asyncio
+async def test_stop_flushes_pending_frame():
+    """收摊时把挂起帧发掉：最多只欠一个窗口的量，丢掉等于让客户端停在过期状态上"""
+    m = ConnectionManager()
+    ws = FakeWS()
+    await m.connect(ws, GAME)
+    await m.broadcast(GAME, _msg("last-words"))
+    assert ws.sent == []
+    await m.stop()
+    assert len(ws.sent) == 1, "挂起帧被丢了"
+
+
+@pytest.mark.asyncio
+async def test_merge_happens_at_source_so_only_one_frame_crosses_nodes(redis):
+    """合并在源头做，跨节点也就只发一帧而不是 N 帧——省的是网络，不只是客户端带宽"""
+    a = await _mk(redis, "node-a")
+    b = await _mk(redis, "node-b")
+    try:
+        ws = FakeWS()
+        await a.connect(ws, GAME)          # 连接只在 A
+        for i in range(5):
+            await b.broadcast(GAME, _msg(f"remote-{i}"))
+        await asyncio.sleep(TICK + 0.2)
+        assert len(ws.sent) == 1, f"跨节点收到 {len(ws.sent)} 帧，合并没生效"
+        assert "remote-4" in ws.sent[0]
+    finally:
+        await a.stop()
+        await b.stop()
 
 
 @pytest.mark.asyncio

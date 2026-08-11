@@ -16,6 +16,17 @@ ws_broadcast_latency = Histogram(
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1, 2, 5),
 )
 
+# 实际下发的帧数 / 被合并掉的帧数。
+# 两者相比即合并率，是"同 Tick 合并帧"这个优化唯一的验收口径。
+ws_frames_sent = Counter(
+    "aivalon_ws_frames_sent_total",
+    "Frames actually written to WS connections",
+)
+ws_frames_merged = Counter(
+    "aivalon_ws_frames_merged_total",
+    "State-update frames coalesced into a later frame (never sent)",
+)
+
 # ---- 对局层 ----
 # 当前活跃房间数
 active_rooms = Gauge(

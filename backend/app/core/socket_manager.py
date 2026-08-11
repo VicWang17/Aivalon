@@ -13,9 +13,22 @@ from typing import Dict, List, Optional
 import asyncio
 import logging
 from fastapi import WebSocket
+from app.core import metrics
 from app.schemas.protocol import WSMessage, WebSocketOpCode
 
 logger = logging.getLogger("aivalon.ws")
+
+# 同 Tick 合并帧的窗口（秒）。
+# 这里没有全局 tick 循环，动作是事件驱动的，所以"同 Tick"落地成一个合并窗口：
+# 窗口内同一房间的多个 STATE_UPDATE 只下发最后一帧。
+# 取 50ms：人眼分辨不出，而一次人类动作触发的 AI 连锁刚好落在这个量级内。
+TICK_INTERVAL = 0.05
+
+# 可以合并的消息类型。
+# STATE_UPDATE 的 payload 只是"去拉最新状态"的通知，同一房间连发 N 帧与发 1 帧
+# 对客户端完全等价，所以可以安全丢掉中间帧。
+# 其余类型都带独有信息（AI_THINKING 带 player_id、ERROR 带原因），合并就是丢信息。
+COALESCIBLE = frozenset({WebSocketOpCode.STATE_UPDATE})
 
 # 房间 → 持有其连接的节点集合
 ROOM_NODES_KEY = "aivalon:ws:rooms:{game_id}"
@@ -36,6 +49,10 @@ class ConnectionManager:
         self._sub_task: Optional[asyncio.Task] = None
         # 存下当前订阅句柄：stop() 要显式关掉它，否则连接只能等 GC
         self._pubsub = None
+        # 合并窗口内挂起的最后一帧：{game_id: msg_json}
+        self._pending: Dict[str, str] = {}
+        # 每个房间最多一个在跑的窗口定时器
+        self._tick_tasks: Dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # 集群接入
@@ -97,8 +114,48 @@ class ConnectionManager:
     # ------------------------------------------------------------------
 
     async def broadcast(self, game_id: str, message: WSMessage):
-        """向指定房间的所有连接广播消息（含其他节点上的连接）"""
+        """向指定房间的所有连接广播消息（含其他节点上的连接）。
+
+        STATE_UPDATE 走 TICK_INTERVAL 合并窗口，窗口内只下发最后一帧；
+        其余类型立即下发。合并在源头做，跨节点也就只发一帧而不是 N 帧。
+        """
         msg_json = message.model_dump_json()
+        if message.type in COALESCIBLE:
+            self._enqueue(game_id, msg_json)
+            return
+        # 不可合并的帧要立即发，但不能越过已挂起的帧——那样客户端会先收到
+        # "AI 正在思考"再收到上一次的状态更新，顺序反了
+        await self._flush(game_id)
+        await self._dispatch(game_id, msg_json)
+
+    def _enqueue(self, game_id: str, msg_json: str) -> None:
+        """放入合并窗口。窗口里已有一帧就直接顶掉它——被顶掉的那帧永远不会下发。"""
+        if game_id in self._pending:
+            metrics.ws_frames_merged.inc()
+        self._pending[game_id] = msg_json
+        if game_id not in self._tick_tasks:
+            self._tick_tasks[game_id] = asyncio.create_task(self._tick(game_id))
+
+    async def _tick(self, game_id: str) -> None:
+        try:
+            await asyncio.sleep(TICK_INTERVAL)
+        except asyncio.CancelledError:
+            return
+        # 先注销自己再 flush：flush 里有 await，期间新来的帧必须能开一个新窗口，
+        # 否则那一帧会挂在 _pending 里等不到任何定时器来发它
+        self._tick_tasks.pop(game_id, None)
+        try:
+            await self._flush(game_id)
+        except Exception as e:
+            logger.warning("合并帧下发失败: game=%s %s", game_id, e)
+
+    async def _flush(self, game_id: str) -> None:
+        msg_json = self._pending.pop(game_id, None)
+        if msg_json is not None:
+            await self._dispatch(game_id, msg_json)
+
+    async def _dispatch(self, game_id: str, msg_json: str) -> None:
+        metrics.ws_frames_sent.inc()
         await self._send_local(game_id, msg_json)
         if self.clustered:
             await self._fanout_remote(game_id, msg_json)
@@ -217,6 +274,15 @@ class ConnectionManager:
                 pass
 
     async def stop(self) -> None:
+        # 挂起的帧先发掉再收摊：合并窗口最多只欠 TICK_INTERVAL 的量，
+        # 直接丢掉等于让客户端停在一个过期状态上
+        for game_id in list(self._tick_tasks.keys()):
+            self._tick_tasks.pop(game_id).cancel()
+        for game_id in list(self._pending.keys()):
+            try:
+                await self._flush(game_id)
+            except Exception:
+                pass
         if self._sub_task:
             self._sub_task.cancel()
             self._sub_task = None
