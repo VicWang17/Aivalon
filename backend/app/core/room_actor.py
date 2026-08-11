@@ -76,5 +76,11 @@ class ActorManager:
     def active_count(self) -> int:
         return len(self._actors)
 
+    @property
+    def game_ids(self) -> list:
+        """本进程当前驻留的房间。房间路由的排障依据：状态活在哪个进程内存里，
+        看的就是这个列表——转发正确的话，一个房间只应出现在归属节点上。"""
+        return list(self._actors.keys())
+
 
 actor_manager = ActorManager()

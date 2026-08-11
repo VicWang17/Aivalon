@@ -128,10 +128,16 @@ class GameService:
             game_state=initial_state,
         )
         # 6. 持久化成功后才入内存（快照已随同一事务写入 Redis）
-        games[game_id] = initial_state
+        #    只在房间归本节点时留内存副本：建局的节点不一定是房间的归属节点，
+        #    非归属节点留下副本的后果是——等房间日后迁到它名下，process_action
+        #    会因为"内存已有"而跳过快照恢复，照着这份建局时的旧状态继续演进。
+        from app.core import node_registry
+        cluster = node_registry.registry
+        if cluster is None or cluster.is_mine(game_id):
+            games[game_id] = initial_state
 
-        # 触发 AI 逻辑 (异步)
-        asyncio.create_task(GameService._trigger_ai_logic(game_id))
+        # 触发 AI 逻辑 (异步)。显式传状态：本节点可能没留副本
+        asyncio.create_task(GameService._trigger_ai_logic(game_id, initial_state))
         
         return initial_state
 
@@ -178,15 +184,18 @@ class GameService:
                 db.close()
 
     @staticmethod
-    async def _trigger_ai_logic(game_id: str):
+    async def _trigger_ai_logic(game_id: str, state: Optional[GameState] = None):
         """
         触发 AI 逻辑：检查当前是否有 AI 需要行动，并投递 Celery 任务
+
+        state 显式传入是为了不依赖本进程内存：建局节点可能并不是房间的归属节点，
+        那种情况下它不保留本地副本（避免日后房间迁回来时照旧副本继续演进）。
         """
         # 避免循环导入
         from app.tasks.ai import process_ai_turn
-        
-        # 获取当前状态 (主进程内存)
-        game = games.get(game_id)
+
+        # 获取当前状态（调用方传入优先，否则取本进程内存）
+        game = state if state is not None else games.get(game_id)
         if not game or game.phase == GamePhase.FINISHED:
             return
 
@@ -232,7 +241,22 @@ class GameService:
 
     @staticmethod
     def get_game(game_id: str) -> Optional[GameState]:
+        """只看本进程内存。多节点下这不足以回答"房间存在吗"，读路径请用 load_game。"""
         return games.get(game_id)
+
+    @staticmethod
+    async def load_game(game_id: str) -> Optional[GameState]:
+        """读取对局状态：本进程内存优先，未命中则回落 Redis 快照。
+
+        多节点下必须有这层回落——房间归属节点在收到第一个动作前，内存里并没有它
+        （建局可能发生在别的节点）。只读本地字典会让归属节点对一个真实存在的房间答 404。
+        刻意不把回落结果写进 games：非归属节点缓存了状态，等房间哪天迁过来就会
+        照着这份旧副本继续演进，造成状态回退。写入只发生在 Actor 内。
+        """
+        local = games.get(game_id)
+        if local is not None:
+            return local
+        return await GameService.restore_game_state(game_id)
 
     @staticmethod
     def get_player_view(game: GameState, viewer_id: int) -> GameState:

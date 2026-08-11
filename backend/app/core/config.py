@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # 集群（房间路由，见 app/core/node_registry.py）
     # 显式指定节点身份：重启后身份不变，名下房间会漂回来；留空则按 主机名-进程号-随机后缀 自动生成
     NODE_ID: str = ""
+    # 本节点的可达地址，供其他节点转发房间请求；多节点部署必须显式配置
+    NODE_ADDR: str = "http://127.0.0.1:8000"
+    # 跨节点转发超时：只覆盖"转发"这一跳，业务处理本身在归属节点上计时
+    ROOM_FORWARD_TIMEOUT: float = 10.0
 
     # AI
     AI_USE_LLM: bool = True  # False 时 AI 直接走规则引擎：压测专用，避免 LLM 延迟与成本污染数据

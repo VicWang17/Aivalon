@@ -69,3 +69,34 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
+@app.get("/cluster", include_in_schema=False)
+async def cluster_status(game_id: str | None = None):
+    """集群视图：本节点身份、存活节点、本地驻留的房间 Actor 数。
+
+    这是排查路由问题的第一现场——路由异常的表现是"动作提交成功但状态没变"，
+    单看响应码分辨不出来，必须能对比各节点的存活视图与 Actor 驻留情况。
+    传 game_id 可直接问"这个房间归谁"，双节点演练靠它判定转发是否正确。
+    """
+    from app.core.room_actor import actor_manager
+
+    registry = node_registry.registry
+    if registry is None:
+        return {"clustered": False, "local_actors": actor_manager.active_count}
+
+    result = {
+        "clustered": True,
+        "node_id": registry.node_id,
+        "live_nodes": sorted(registry.live_nodes),
+        "local_actors": actor_manager.active_count,
+        "resident_games": sorted(actor_manager.game_ids),
+    }
+    if game_id:
+        owner = registry.owner_of(game_id)
+        result["query"] = {
+            "game_id": game_id,
+            "owner": owner,
+            "is_mine": registry.is_mine(game_id),
+            "owner_addr": registry.addr_of(owner) if owner else None,
+        }
+    return result

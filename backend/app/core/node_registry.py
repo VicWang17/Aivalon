@@ -21,7 +21,7 @@ import logging
 import os
 import socket
 import uuid
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from app.core.hash_ring import HashRing
 
@@ -29,6 +29,9 @@ logger = logging.getLogger("aivalon.cluster")
 
 # 存活节点表：ZSET，member = node_id，score = 最后心跳的 Redis 时间戳（秒）
 NODE_SET_KEY = "aivalon:cluster:nodes"
+# 节点地址表：HASH，node_id -> 可达地址。身份与地址分开存：
+#   身份决定房间归属（进哈希环），地址只是转发用的联系方式。同一节点换 IP 不该引起房间迁移。
+NODE_ADDR_KEY = "aivalon:cluster:addrs"
 
 HEARTBEAT_INTERVAL = 2.0
 # 判死阈值取心跳间隔的 3 倍：容忍偶发一次心跳丢失（GC 停顿、Redis 抖动）而不误摘节点。
@@ -48,16 +51,26 @@ def resolve_node_id() -> str:
     return f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
 
 
+def _default_addr() -> str:
+    """本节点可达地址。默认值只对单机有意义，多节点部署必须显式配置 NODE_ADDR。"""
+    from app.core.config import settings
+
+    return getattr(settings, "NODE_ADDR", "") or os.getenv("NODE_ADDR", "")
+
+
 class NodeRegistry:
     """节点注册 + 心跳 + 环维护。一个进程一个实例。"""
 
     def __init__(self, redis, node_id: Optional[str] = None,
-                 ttl: float = NODE_TTL, interval: float = HEARTBEAT_INTERVAL):
+                 ttl: float = NODE_TTL, interval: float = HEARTBEAT_INTERVAL,
+                 addr: Optional[str] = None):
         self._redis = redis
         self.node_id = node_id or resolve_node_id()
         self._ttl = ttl
         self._interval = interval
+        self._addr = addr if addr is not None else _default_addr()
         self._ring = HashRing()
+        self._addrs: Dict[str, str] = {}
         self._task: Optional[asyncio.Task] = None
 
     async def _now(self) -> float:
@@ -69,10 +82,14 @@ class NodeRegistry:
         """续约自己 + 清理死节点 + 取存活集合，并按需重建环。返回存活节点列表。"""
         now = await self._now()
         await self._redis.zadd(NODE_SET_KEY, {self.node_id: now})
+        if self._addr:
+            await self._redis.hset(NODE_ADDR_KEY, self.node_id, self._addr)
         # 清理：心跳早于 (now - ttl) 的节点视为已死。幂等，多节点同时清理无副作用。
         await self._redis.zremrangebyscore(NODE_SET_KEY, "-inf", now - self._ttl)
         alive = await self._redis.zrangebyscore(NODE_SET_KEY, now - self._ttl, "+inf")
         self._sync_ring(alive)
+        # 地址表随存活集合刷新：死节点的地址留着无害，但会让转发指向黑洞，不如一并清掉
+        self._addrs = await self._redis.hgetall(NODE_ADDR_KEY) or {}
         return alive
 
     def _sync_ring(self, alive: List[str]) -> None:
@@ -94,6 +111,7 @@ class NodeRegistry:
         这能把"计划内重启"的路由空窗从 TTL 级别压到一次往返——只有真崩溃才走 TTL 判死。"""
         try:
             await self._redis.zrem(NODE_SET_KEY, self.node_id)
+            await self._redis.hdel(NODE_ADDR_KEY, self.node_id)
             logger.info("节点已注销: %s", self.node_id)
         except Exception as e:
             # 下线路径不能因为 Redis 抖动阻塞进程退出：留给 TTL 兜底即可
@@ -102,6 +120,10 @@ class NodeRegistry:
     def owner_of(self, game_id: str) -> Optional[str]:
         """房间归属节点。环为空（Redis 不可用或尚未首次心跳）时返回 None，由调用方降级。"""
         return self._ring.get_node(game_id)
+
+    def addr_of(self, node_id: str) -> Optional[str]:
+        """节点的可达地址（转发用）。取不到地址意味着无法转发，调用方应本地兜底处理。"""
+        return self._addrs.get(node_id)
 
     def is_mine(self, game_id: str) -> bool:
         """房间是否归本节点。环为空时返回 True——单机降级：拿不到集群视图就自己扛，

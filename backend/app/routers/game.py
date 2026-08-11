@@ -5,8 +5,9 @@ import asyncio
 import random
 import time
 from typing import List, Annotated
-from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Response
 from redis.asyncio import Redis
+from app.core import room_router
 from app.core.rate_limit import create_game_rate_limit, action_rate_limit
 from app.schemas.game import GameCreateRequest, GameCreateResponse, GameState, GameActionRequest, GameSummary, GameEventSchema, RecentGameSummary
 from app.services.game_service import GameService
@@ -145,16 +146,29 @@ async def broadcast_ai_thinking(
 
 @router.post("/{game_id}/ai_action", include_in_schema=False)
 async def process_ai_action(
-    game_id: str, 
+    game_id: str,
     request: AIActionRequest,
+    http_request: Request,
     x_internal_secret: str = Header(None)
 ):
     """
     Internal API for AI Worker to submit actions
+
+    这也是一条写路径：AI worker 提交的动作同样要落到房间归属节点的 Actor 上。
+    worker 通常只认一个入口地址，请求打到哪个节点是随机的，所以必须同样走路由转发。
     """
     if x_internal_secret != settings.SECRET_KEY:
         raise HTTPException(status_code=403, detail="Invalid internal secret")
-        
+
+    target = room_router.should_forward(game_id, http_request)
+    if target:
+        forwarded = await room_router.forward(target, http_request, await http_request.body())
+        return Response(
+            content=forwarded.content,
+            status_code=forwarded.status_code,
+            media_type=forwarded.headers.get("content-type", "application/json"),
+        )
+
     await GameService.process_action(
         game_id, 
         request.player_id, 
@@ -202,20 +216,36 @@ async def get_game_events(
 @router.get("/{game_id}", response_model=ResponseModel[GameState])
 async def get_game_state(
     game_id: str,
+    request: Request,
     current_user: User = Depends(get_current_user)
 ):
     """
     获取对局快照（支持断线重连/刷新）。
     返回的数据已根据当前玩家身份进行脱敏。
+
+    读路径同样要路由：权威状态在归属节点的进程内存里，别的节点手里可能是一份
+    过期副本（例如建局节点留下的初始快照），读到它会让客户端永远看不到最新回合。
+    多付一次集群内跳转，换来"读到的一定是刚写进去的那份"。
     """
-    # 1. 获取全局状态
-    game = GameService.get_game(game_id)
+    target = room_router.should_forward(game_id, request)
+    if target:
+        forwarded = await room_router.forward(target, request, b"")
+        return Response(
+            content=forwarded.content,
+            status_code=forwarded.status_code,
+            media_type=forwarded.headers.get("content-type", "application/json"),
+        )
+
+    # 1. 获取全局状态：本进程内存优先，未命中回落 Redis 快照。
+    #    归属节点在收到第一个动作前内存里没有这个房间（建局可能发生在别的节点），
+    #    只读本地字典会对真实存在的房间答 404。
+    game = await GameService.load_game(game_id)
     if not game:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Game not found"
         )
-    
+
     # 2. 获取视角视图
     # Service 层会处理脱敏逻辑
     player_view = GameService.get_player_view(game, current_user.id)
@@ -226,6 +256,7 @@ async def get_game_state(
 async def submit_action(
     game_id: str,
     action: GameActionRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     x_idempotency_key: Annotated[str | None, Header()] = None,
     redis: Redis = Depends(get_redis)
@@ -234,8 +265,19 @@ async def submit_action(
     提交玩家动作（统一入口）。
     根据 action_type 和 payload 执行相应的业务逻辑。
     支持幂等性校验：通过 Header 'x-idempotency-key' 传递唯一请求ID。
+
+    房间路由：房间状态活在归属节点的进程内存里（Actor 单写者），
+    不归本节点的请求转发过去处理，见 app/core/room_router.py。
     """
-    
+    target = room_router.should_forward(game_id, request)
+    if target:
+        forwarded = await room_router.forward(target, request, await request.body())
+        return Response(
+            content=forwarded.content,
+            status_code=forwarded.status_code,
+            media_type=forwarded.headers.get("content-type", "application/json"),
+        )
+
     # 封装核心处理逻辑
     async def _process():
         # 调用 Service 处理动作
