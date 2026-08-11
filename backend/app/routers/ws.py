@@ -80,3 +80,5 @@ async def websocket_endpoint(
                 
     except WebSocketDisconnect:
         manager.disconnect(websocket, game_id)
+        # 本节点已无该房间连接时从连接路由表摘掉自己，否则跨节点扇出会一直往这里发
+        await manager.unregister_if_empty(game_id)

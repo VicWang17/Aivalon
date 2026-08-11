@@ -70,6 +70,21 @@
 - **原始值必须留档**：只存聚合结果，事后想换口径（换分位数定义、换切分方式、补 P999）就得重跑压测。我们把原始样本存成 `bench/results/*_latency_raw.json`
 - **关联代码**：`bench/locust_s2.py` 头部的原始延迟采集器（`events.request` 采样 + `events.quitting` 落档）
 
+## 2026-08-11 · E-1（WS 跨节点扇出）
+
+### 020 用"存活节点视图"过滤广播目标，把活节点的消息弄丢了
+
+- **现象**：新增的 10 个扇出测试单独跑全绿，`./run_tests.sh` 里 3 个失败——`test_broadcast_reaches_connection_on_another_node` 断言 `len(ws.sent) == 1` 实收 0。二分到 `pytest tests/test_auth_simple.py tests/test_ws_fanout.py` 稳定复现，单跑 `test_ws_fanout.py` 必过。典型的测试顺序依赖。
+- **排查**：先怀疑 `socket_manager.manager` 这个模块级单例被 `test_auth_simple.py` 的 TestClient 启动 lifespan 时 `bind_cluster` + 订阅污染了（日志确实有 `WS 广播频道已订阅: ...-561bd8`）。但扇出测试用的是自己 `ConnectionManager()` 实例，单例不该影响它。真正的泄漏是另一个全局：lifespan 里 `node_registry.init()` 把 `node_registry.registry` 设成了真实注册器，退出时 `cluster.stop()` 只摘 Redis，**没把这个全局变量清掉**。于是扇出测试里 `_live_nodes()` 返回的是残留的真实节点集合（`node-1` / `...561bd8`），`{"node-a"} & live` 为空集。
+- **根因**：不是测试脏，是设计错。我在扇出前按存活视图过滤目标节点、还顺手把"死"条目从路由表删了。**存活视图只要偏一点（刚启动没同步、拿到上一轮旧视图、或本例的残留全局），活节点就被判死，广播被静默丢弃**——而且连表项一起删了，后面也修不回来。
+- **解决**：删掉整个存活过滤与顺手清理。判据是**两种错误的代价不对等**：多发一次给死节点的频道是无害的（没订阅者，Redis 直接丢），丢一条广播是客户端界面卡死。宁可多发。残留条目改用 key TTL 兜底（`ROOM_NODES_TTL = 3600`，每次登记续期），一个房间的成员数天然被集群规模封顶，本来就不会无限增长。
+- **顺带修掉的第二个坑**：`test_subscription_survives_being_dropped` 用 `CLIENT KILL TYPE pubsub` 模拟断线，那是**杀整个 Redis 上所有订阅连接**，会连带打死同测试里的 B 节点和本机开着的开发服务。改成给 `ConnectionManager` 加 `drop_subscription()` 只断自己。注意不能对正在 `listen()` 的 PubSub 调 `aclose()`——会和读协程抢同一个 socket（`readuntil() called while another coroutine is already waiting`），还污染共享连接池；要拿到 `pubsub.connection` 断底层 socket。
+- **经验**：
+  - **凡是"根据某个视图判定对方已死，然后跳过/删除"的逻辑，先问偏差的代价是否对称**。判死的代价大于误发的代价时，就不该判死。故障转移那边（C06）敢判死是因为代价对称——不接管房间也是不可用；广播这里不对称。
+  - **测试顺序依赖往往是泄漏的全局在报警，而不是测试写得脏**。`init()` 设了模块级全局却没有对应的清理，是个真实的进程内污染源。
+  - 测试里的"破坏性操作"要问清爆炸半径。`CLIENT KILL TYPE pubsub` 这种服务端全局操作，在共享 Redis 上会打到测试范围之外。
+- **关联代码**：`app/core/socket_manager.py`（连接路由表 + 定向扇出 + 防环）/ `tests/test_ws_fanout.py`（11 项）
+
 ## 2026-08-11 · D-3.5（动作 P99 口径复测：一个写进简历的数字站不住）
 
 ### 019 "动作 P99 < 100ms"两轮实测差三倍：不是性能不稳，是分位数口径错了
