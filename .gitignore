@@ -52,3 +52,6 @@ logs/
 
 # 压测生成的凭证（含 token，勿提交）
 bench/users.json
+
+# 宕机演练脚本的临时状态（记录当前演练对局 id）
+bench/.drill_state.json

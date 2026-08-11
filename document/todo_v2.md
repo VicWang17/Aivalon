@@ -9,15 +9,19 @@
 
 ## 🔄 交接状态（2026-08-11 晚，换机/换 AI 续做必读）
 
-**当前位置**：D 组 D-2 Write-Behind 收尾。**30s 超时墙已闭环**（DEVLOG 012），剩 kill 演练 + 写压力量化两项。
+**当前位置**：D 组 D-2 Write-Behind 收尾。30s 超时墙已闭环（DEVLOG 012），kill 演练 + RPO 量化已过（DEVLOG 013），顺带修掉一个静默丢事件 bug（DEVLOG 014）。**只剩"MySQL 写压力下降比例"一项**（缺基线对照组绝对值，需重构口径）。
 
 **已完成**：A 组（可观测）、B 组（压测平台 + v1 基线报告）、C 组（测试安全网 24 项）、D-1（房间 Actor 去锁）、D-2 代码（Write-Behind：事件先入 Redis Stream + 快照一个事务，flusher 每 200ms 批量刷 MySQL）。
 
 **D-2 验证状态（未闭合，接手先做）**：
 - ✅ 24 项测试全绿（含全对局集成测试，走的就是新 Write-Behind 链路）
 - ✅ 动作处理主体实测 ~2ms（深拷贝 0.2 + journal 1.5）；空载动作 7~13ms（基线 18~25ms）
-- ❌ kill 恢复演练未做（kill uvicorn → 重启 → 对局从 Redis 快照恢复继续打）
+- ✅ **kill 恢复演练已过（DEVLOG 013）**：`kill -9` API（flusher 同进程一起死）→ 重启 → 对局从 Redis 快照恢复（`phase=vote round=2` → 读回 `phase=mission round=2`）→ 续打到 `finished`；MySQL 101 事件 / distinct seq 101 / **重复行 0**。演练脚本固化为 `bench/drill_kill_recovery.py`（`play|measure|resume|watch` 四段，D-3 节点迁移可复用）
+- ✅ **RPO 已量化（DEVLOG 013）**：20 房间负载下 427 次采样 @0.1s——峰值未刷 **16 条**（最坏 RPO）/ P95 10 / 均值 3.45 / 非零占比 84.5%；时间维度 ≤ ~200ms（`FLUSH_INTERVAL`）。注意必须在负载下测，空跑窗口恒为 0
+  - 边界（不含糊过去）：`restore_game_state` 的"从 DB 重建 GameState"分支仍是 `# TODO` 返回 `None`，**恢复能力当前依赖 Redis 快照存在**；Redis 全丢时对局无法重建
+- ✅ **顺带修掉一个静默丢事件 bug（DEVLOG 014）**：全库 372 局 `GAME_START` 事件 **0 条**——`game_events.game_id` 有外键指向 `games.id`，而 flusher 先插事件行、后补建 `games` 记录，外键失败被 `INSERT IGNORE` 降级成 warning 静默丢弃。修法：`games` 记录补建提到事件插入之前。这个 bug 是 013 演练的对账环节（`count(*)` vs `max(seq)` 差 1）挖出来的
 - ❌ MySQL 写压力下降比例未量化（简历"写压力 -80%"需要这个数字）
+  - 卡点：`v1_baseline.md` **没有记录绝对写 QPS 数字**，只有定性结论（"每动作同步写 MySQL，写路径饱和"，P0 瓶颈）。没有对照组绝对值，需要重新构造对比口径（如取 MySQL `Com_insert`/`Innodb_rows_inserted` 在一轮 S2 前后的增量，对比"每动作同步写"与"批量刷库"两种模式）
 - ✅ **30s 超时墙已闭环（2026-08-11 16:00，DEVLOG 012）**。真凶不是原假设的 Actor future 悬挂泄漏，而是**"持有并等待"自死锁**：`get_current_user` 用 `Depends(get_db)`（连接持有到请求结束）+ 下游 `_load_user_map` 再取第二个连接 → 单请求持有 2 个连接 → 15 个鉴权连接占满池后集体等第二个连接，池永不恢复。**这个 bug 由 011 的修复引入**（把复用 db 的查询抽成独立 Session，单请求持有数 1→2）
   - 定位手段：新增连接池探针 `app/core/pool_probe.py`（checkout 时记 trace_id + 调用栈，报告持有超阈值未还的连接），`DB_POOL_PROBE=true` 开启，默认关闭
   - 修法：`get_current_user` 改手动短生命周期 Session（与 `get_ws_user` 同一招，DEVLOG 006 当时只改了 WS 路径）
@@ -115,11 +119,11 @@ python -m app.core.outbox_relay &
 - [ ] 节点宕机迁移：房间漂移到健康节点，状态可恢复
 
 ### D.2 写路径异步化
-- [ ] 事件双写：内存 + Redis Stream（持久化兜底）
-- [ ] 批量刷盘器：时间窗口 / 批量阈值触发，按 seq 顺序刷 MySQL
-- [ ] 宕机恢复：Redis Stream 未刷盘事件 + 定期 snapshot 重建
-- [ ] Outbox 角色调整：从主链路降级为持久化与分发兜底
-- [ ] RPO 量化：测算宕机丢失窗口并记录（简历"量化验证宕机恢复 RPO"的直接证据）
+- [x] 事件双写：内存 + Redis Stream（持久化兜底）
+- [x] 批量刷盘器：时间窗口 / 批量阈值触发，按 seq 顺序刷 MySQL
+- [x] 宕机恢复：Redis Stream 未刷盘事件 + 定期 snapshot 重建（**边界**：DB 重建分支仍是 TODO，恢复依赖 Redis 快照存在，见 DEVLOG 013）
+- [x] Outbox 角色调整：从主链路降级为持久化与分发兜底（flusher 同事务写 outbox）
+- [x] RPO 量化：峰值 16 条 / P95 10 / 均值 3.45 @20 房间；时间维度 ≤200ms（DEVLOG 013）
 
 ### D.3 AI 链路分层（简历第 7 条证据链）
 - [ ] AI 决策接口抽象：RuleEngine / LLMEngine 可插拔双引擎
