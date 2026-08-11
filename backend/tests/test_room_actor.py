@@ -72,13 +72,13 @@ async def test_process_action_prevents_dirty_memory(mock_redis):
     with patch("app.services.game_service.redis_client", mock_redis), \
          patch("app.services.game_service.SessionLocal"), \
          patch("app.core.game_rules.GameRuleValidator.validate_action"), \
-         patch.object(GameService, '_append_event', side_effect=Exception("DB Error")) as mock_append:
+         patch("app.services.game_service.event_journal.append_with_snapshot", new_callable=AsyncMock, side_effect=Exception("Redis Error")) as mock_append:
 
         try:
             await GameService.process_action(game_id, user_id, ActionType.PROPOSE, {"target_ids": [1]})
         except HTTPException as e:
             assert e.status_code == 500
-            assert "DB Error" in e.detail
+            assert "Redis Error" in e.detail
         except Exception as e:
             pytest.fail(f"Raised wrong exception: {type(e)} {e}")
         else:

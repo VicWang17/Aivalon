@@ -62,6 +62,9 @@ class GameState(BaseModel):
     pending_mission_results: List[MissionResult] = [] # 当前轮次待结算的任务结果（临时存储）
     winner: Optional[str] = None         # 胜利阵营 (good/evil)
 
+    # 事件序号游标（Write-Behind）：Actor 单写者内存分配 seq，随快照持久化，宕机恢复后续号
+    last_event_seq: int = 0
+
     class Config:
         from_attributes = True
 

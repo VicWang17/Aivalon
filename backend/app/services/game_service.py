@@ -20,6 +20,7 @@ import json
 import copy
 from app.core.redis import redis_client
 from app.core.room_actor import actor_manager
+from app.core import event_journal
 from celery import group
 
 # 内存存储，用于临时保存对局状态
@@ -39,66 +40,6 @@ from app.services.ai_service import AIService
 from app.services.rank_service import RankService
 
 class GameService:
-    @staticmethod
-    def _append_event(db: Session, game_id: str, event_type: str, player_id: Optional[int], payload: dict) -> None:
-        """
-        向 game_events 表追加事件，并自动处理 seq (带乐观锁重试)
-        同时写入 Outbox 表以保证消息可靠投递
-        """
-        from sqlalchemy.exc import IntegrityError
-        
-        max_retries = 20  # 提高重试次数以应对高并发
-        for attempt in range(max_retries):
-            try:
-                # 使用 savepoint 隔离每次尝试
-                with db.begin_nested():
-                    # 1. 重新获取当前最大 seq (READ COMMITTED 下可见最新提交)
-                    # 这样可以避免盲目递增导致的竞争落后
-                    last_event = db.query(GameEventModel).filter(
-                        GameEventModel.game_id == game_id
-                    ).order_by(GameEventModel.seq.desc()).first()
-                    
-                    next_seq = 1
-                    if last_event:
-                        next_seq = last_event.seq + 1
-                        
-                    # 2. 尝试插入新事件
-                    new_event = GameEventModel(
-                        game_id=game_id,
-                        seq=next_seq,
-                        event_type=event_type,
-                        player_id=player_id,
-                        payload=payload
-                    )
-                    db.add(new_event)
-
-                    # 3. 同时写入 Outbox (事务性发件箱)
-                    # 确保事件通知与数据库写入原子一致
-                    outbox_event = OutboxEvent(
-                        aggregate_type="game",
-                        aggregate_id=game_id,
-                        event_type=event_type,
-                        payload=payload,
-                        status="pending"
-                    )
-                    db.add(outbox_event)
-
-                    db.flush() # 立即触发唯一约束检查
-                
-                # 成功则跳出循环
-                break
-                
-            except IntegrityError:
-                # 发生冲突（seq 被抢占）
-                if attempt == max_retries - 1:
-                    # 超过重试次数，抛出异常
-                    # 此时外部事务需要处理回滚
-                    raise 
-                
-                # 注意：begin_nested() 失败会自动回滚到 savepoint，
-                # 下一次循环会重新查询最新的 seq
-                continue
-
     @staticmethod
     async def create_game(player_ids: List[int], user_map: Dict[int, str], creator_id: Optional[int] = None) -> GameState:
         """
@@ -164,80 +105,35 @@ class GameService:
             phase_start_time=time.time(),
             players=players,
             leader_id=initial_leader_id,
-            speaker_id=initial_leader_id # 队长开始发言
+            speaker_id=initial_leader_id, # 队长开始发言
+            last_event_seq=1  # GAME_START 固定为 1 号事件（见下方 journal 调用），动作事件从 2 续号
         )
         
-        # 5. 保存到内存和 Redis
-        await GameService.save_game_state(game_id, initial_state)
-        
-        # 6. 保存到数据库 (异步线程执行，避免阻塞事件循环)
-        await asyncio.to_thread(
-            GameService._persist_new_game, 
-            game_id, 
-            player_ids, 
-            creator_id, 
-            players, 
-            initial_leader_id
+        # 5. Write-Behind：GAME_START 事件 + 初始快照入 Redis Stream（同一事务），
+        #    games 表记录由 flusher 补写——创建路径同样不碰 MySQL（20 并发房间创建超时的根因修复）
+        await event_journal.append_with_snapshot(
+            game_id=game_id,
+            seq=1,  # GAME_START 固定为 1 号事件（与 initial_state.last_event_seq 一致）
+            event_type="GAME_START",
+            player_id=creator_id,
+            payload={
+                "players": [p.model_dump() for p in players],
+                "roles": [p.character for p in players],  # 注意：上帝视角日志，含全员身份
+                "initial_leader": initial_leader_id,
+                "player_ids": player_ids,
+                "creator_id": creator_id,
+            },
+            phase=initial_state.phase.value,
+            winner=None,
+            game_state=initial_state,
         )
+        # 6. 持久化成功后才入内存（快照已随同一事务写入 Redis）
+        games[game_id] = initial_state
 
         # 触发 AI 逻辑 (异步)
         asyncio.create_task(GameService._trigger_ai_logic(game_id))
         
         return initial_state
-
-    @staticmethod
-    def _persist_new_game(game_id: str, player_ids: List[int], creator_id: Optional[int], players: List[PlayerState], initial_leader_id: int):
-        """
-        同步方法：持久化新对局数据到数据库
-        """
-        db = SessionLocal()
-        try:
-            # 6.1 创建 Game 记录
-            new_game_record = GameModel(
-                id=game_id,
-                status="playing",
-                player_ids=player_ids,
-                winner=None,
-                user_id=creator_id
-            )
-            db.add(new_game_record)
-            
-            # 6.2 记录 GAME_START 事件
-            GameService._append_event(
-                db, 
-                game_id, 
-                "GAME_START", 
-                creator_id, 
-                {
-                    "players": [p.model_dump() for p in players],
-                    "roles": [p.character for p in players], # 注意：这里记录了所有人的身份，属于上帝视角的日志
-                    "initial_leader": initial_leader_id
-                }
-            )
-            
-            db.commit()
-        except Exception as e:
-            print(f"Failed to persist game {game_id}: {e}")
-            db.rollback()
-            # 这里可以选择是否抛出异常中断创建，或者降级为仅内存模式
-            # 为了数据一致性，建议抛出异常
-            raise HTTPException(status_code=500, detail="Failed to create game persistence")
-        finally:
-            db.close()
-
-    @staticmethod
-    async def save_game_state(game_id: str, game_state: GameState):
-        """
-        保存游戏状态到 Redis (用于 Worker 共享状态)
-        """
-        try:
-            # 序列化并保存，过期时间 1 小时
-            await redis_client.set(f"game:{game_id}:state", game_state.model_dump_json(), ex=3600)
-            
-            # 同时更新内存缓存 (仅当前进程有效)
-            games[game_id] = game_state
-        except Exception as e:
-            print(f"[GameService] Failed to save game state to Redis: {e}")
 
     @staticmethod
     async def restore_game_state(game_id: str, db: Session = None, redis_conn = None) -> Optional[GameState]:
@@ -402,6 +298,13 @@ class GameService:
         处理玩家动作（统一入口）：路由到房间 Actor 串行处理。
         单写者模型：同一房间的动作在 Actor 队列中逐个执行，替代原 Redis 分布式锁。
         """
+        # 宕机/休眠恢复：内存未命中时从 Redis 快照（或 DB）重建房间状态（Write-Behind 恢复链路）
+        if game_id not in games:
+            restored = await GameService.restore_game_state(game_id)
+            if not restored:
+                raise HTTPException(status_code=404, detail="Game not found")
+            games[game_id] = restored
+
         actor = actor_manager.get_or_create(game_id, GameService._apply_action)
         return await actor.submit(user_id, action_type, payload)
 
@@ -709,22 +612,23 @@ class GameService:
             
                 game.phase_start_time = time.time()
         
-        # 3. 持久化事件与状态更新
+        # 3. Write-Behind 持久化：事件入 Redis Stream + 状态快照（同一事务），MySQL 由 flusher 批量补写
+        #    seq 由 Actor 单写者内存分配（last_event_seq），替代原"查库 max(seq) + 乐观重试"
         try:
-            # 异步线程执行数据库操作
-            await asyncio.to_thread(
-                GameService._persist_action,
-                game_id,
-                action_type,
-                user_id,
-                event_payload,
-                game.phase,
-                game.winner if game.phase == GamePhase.FINISHED else None,
-                game.players
+            game.last_event_seq += 1
+            await event_journal.append_with_snapshot(
+                game_id=game_id,
+                seq=game.last_event_seq,
+                event_type=action_type.value if hasattr(action_type, "value") else str(action_type),
+                player_id=user_id,
+                payload=event_payload,
+                phase=game.phase.value if hasattr(game.phase, "value") else str(game.phase),
+                winner=(game.winner.value if hasattr(game.winner, "value") else game.winner) if game.phase == GamePhase.FINISHED else None,
+                game_state=game,
             )
-            
-            # 3.3 持久化成功后，才更新内存状态和 Redis
-            await GameService.save_game_state(game_id, game)
+
+            # 3.3 持久化成功后，才更新内存状态（快照已随同一事务写入 Redis）
+            games[game_id] = game
             
             # 如果游戏结束，异步更新排行榜和最近对局缓存
             if game.phase == GamePhase.FINISHED and game.winner:
@@ -753,7 +657,7 @@ class GameService:
             # 持久化失败，抛出异常，触发 HTTP 500 (此时内存状态未更新，保持一致)
             raise HTTPException(status_code=500, detail=f"Failed to process action: {str(e)}")
 
-        # 4. 广播更新 (在锁内广播，确保顺序)
+        # 4. 广播更新 (Actor 内串行广播，顺序由单写者保证)
         await manager.broadcast_game_update(game_id, game)
         
         # 5. 触发 AI 逻辑 (异步)
@@ -762,37 +666,6 @@ class GameService:
         asyncio.create_task(GameService._trigger_ai_logic(game_id))
         
         return game
-
-    @staticmethod
-    def _persist_action(game_id: str, action_type: str, user_id: int, event_payload: dict, phase: str, winner: Optional[str], players: Optional[List[PlayerState]] = None):
-        """
-        同步方法：持久化动作事件和游戏状态
-        """
-        db = SessionLocal()
-        try:
-            # 3.1 写入当前动作事件
-            GameService._append_event(db, game_id, action_type, user_id, event_payload)
-            
-            # 3.2 如果游戏结束，更新 Game 表状态
-            if phase == GamePhase.FINISHED:
-                game_record = db.query(GameModel).filter(GameModel.id == game_id).first()
-                if game_record:
-                    game_record.status = "finished"
-                    game_record.winner = winner
-                    game_record.finished_at = func.now()
-                    db.add(game_record)
-                
-                # --- 更新用户胜场统计 (已移至 Celery 异步任务) ---
-                # 代码已移除，由 app.tasks.stats.process_game_result 处理
-                # ------------------------
-            
-            db.commit()
-            
-        except Exception as e:
-            db.rollback()
-            raise e
-        finally:
-            db.close()
 
     @staticmethod
     def get_user_games(user_id: int, skip: int = 0, limit: int = 20) -> List[GameModel]:

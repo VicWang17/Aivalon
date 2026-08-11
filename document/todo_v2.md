@@ -5,6 +5,46 @@
 > **数字口径**：本文件中所有性能数字为**目标参考值**，最终以 v1 基线实测与优化后实测为准回填，并同步修改简历——测不出来就改简历，不许写目标值充数。
 > 纪律：A（可观测+基线）未完成前，不动任何优化；每个优化项必须有前后对比数字。
 
+---
+
+## 🔄 交接状态（2026-08-11，换机/换 AI 续做必读）
+
+**当前位置**：D 组（热路径重构）进行到 D-2 Write-Behind，代码完成但未最终验证。
+
+**已完成**：A 组（可观测）、B 组（压测平台 + v1 基线报告）、C 组（测试安全网 24 项）、D-1（房间 Actor 去锁）、D-2 代码（Write-Behind：事件先入 Redis Stream + 快照一个事务，flusher 每 200ms 批量刷 MySQL）。
+
+**D-2 验证状态（未闭合，接手先做）**：
+- ✅ 24 项测试全绿（含全对局集成测试，走的就是新 Write-Behind 链路）
+- ✅ 动作处理主体实测 ~2ms（深拷贝 0.2 + journal 1.5）；空载动作 7~13ms（基线 18~25ms）
+- ⚠️ **20 并发房间复测结果不稳定**：一次出现创建对局 90s 超时（QueuePool 打满），最近一轮（1921 请求）P50 7ms / P99 110ms / 仅 1 次 500（DEVLOG 005 竞态家族）。需要**干净环境复跑 2~3 轮 20 房间**确认稳定性，若创建超时复现则排查 flusher 与连接池的相互影响
+- ❌ kill 恢复演练未做（kill uvicorn → 重启 → 对局从 Redis 快照恢复继续打）
+- ❌ MySQL 写压力下降比例未量化（简历"写压力 -80%"需要这个数字）
+
+**接手第一步（D-2 收尾）**：干净环境（单 uvicorn 实例！见 DEVLOG 008）跑 `locust -f ../bench/locust_s2.py --headless -u 20 -r 20 -t 120s` 两轮确认稳定 → kill 演练 → 量化写压力 → 提交 → 走 D-3。
+
+**环境启动**（bench 配置）：
+```bash
+docker-compose up -d
+cd backend && source venv/bin/activate
+export AI_USE_LLM=false AI_TASK_RATE_LIMIT=100000/m RATE_LIMIT_ACTION_TIMES=100 RATE_LIMIT_CREATE_GAME_TIMES=10000
+uvicorn app.main:app --port 8000 &          # 确认 pgrep -f "uvicorn app.main" | wc -l == 1
+celery -A app.core.celery_app worker --loglevel=warning &
+python -m app.core.outbox_relay &
+./run_tests.sh                              # 应 24 项全绿
+```
+
+**关键文件地图**：
+- `backend/app/core/room_actor.py` — 房间 Actor（D-1）
+- `backend/app/core/event_journal.py` — Write-Behind 日志（事件+快照一个 Redis 事务）
+- `backend/app/core/event_flusher.py` — 批量刷库器（INSERT IGNORE 幂等 + 游标推进）
+- `document/benchmark/v1_baseline.md` — 基线报告（所有对比数字的对照组）
+- `document/DEVLOG.md` — 排障记录 001~008 + 概念速查 C01~C04
+- `bench/README.md` — 压测场景运行方法
+
+**之后顺序**：D-3（路由表+故障转移，最小真实版）→ D-4（AI 双引擎+降级开关）→ D-5（验证报告+ADR-01/02）→ E 组（网关广播）→ F/G（缓存热榜）→ H（韧性演练）→ I（叙事资产收尾+简历数字回填核对）。
+
+---
+
 ## A. 可观测性（一切优化的前置）
 
 ### A.1 指标（Prometheus + Grafana）

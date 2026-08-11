@@ -98,16 +98,26 @@ def test_full_game_flow():
     assert state and state["phase"] == "finished", "180s 内对局未完成"
     assert state["winner"] in ("good", "evil"), f"胜者异常: {state['winner']}"
 
-    # 3. 历史列表可见该局
-    resp = requests.get(f"{BASE}/api/v1/games/history", headers=headers, timeout=10)
-    assert resp.status_code == 200
-    history = resp.json()["data"]
-    assert any(g["id"] == game_id for g in history), "历史列表未包含本局"
+    # 3. 历史列表可见该局（Write-Behind 下有 ≤200ms 刷库延迟，短轮询等待可见性）
+    deadline = time.time() + 10
+    while True:
+        resp = requests.get(f"{BASE}/api/v1/games/history", headers=headers, timeout=10)
+        assert resp.status_code == 200
+        history = resp.json()["data"]
+        if any(g["id"] == game_id for g in history):
+            break
+        assert time.time() < deadline, "历史列表 10s 内未出现本局（flusher 未工作？）"
+        time.sleep(0.5)
 
-    # 4. 回放事件流：非空且 seq 单调递增
-    resp = requests.get(f"{BASE}/api/v1/games/{game_id}/events", headers=headers, timeout=10)
-    assert resp.status_code == 200
-    events = resp.json()["data"]
-    assert len(events) > 0, "事件流为空"
+    # 4. 回放事件流：非空且 seq 单调递增（同样等待刷库可见）
+    deadline = time.time() + 10
+    while True:
+        resp = requests.get(f"{BASE}/api/v1/games/{game_id}/events", headers=headers, timeout=10)
+        assert resp.status_code == 200
+        events = resp.json()["data"]
+        if events:
+            break
+        assert time.time() < deadline, "事件流 10s 内为空（flusher 未工作？）"
+        time.sleep(0.5)
     seqs = [e["seq"] for e in events]
     assert seqs == sorted(seqs), f"事件 seq 乱序: {seqs[:20]}"

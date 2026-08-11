@@ -22,6 +22,8 @@ services:
       - "6379:6379"
     volumes:
       - ./data/redis:/data
+    # AOF everysec：Write-Behind 的 Stream 是事件持久化点，宕机最多丢 1s（RPO 口径见 ADR-02）
+    command: redis-server --appendonly yes --appendfsync everysec
 
   rabbitmq:
     image: rabbitmq:3-management
