@@ -65,7 +65,7 @@ python -m app.core.outbox_relay &
 
 ## E. 长连接与广播（简历⑤）
 
-- [ ] WS 网关拆成独立服务：只做连接维持、握手鉴权、消息转发,不含业务逻辑
+- [x] WS 网关拆成独立服务：`app/gateway.py` 独立入口,复用 `ws.router` 只挂 WS 一个路由,不进一致性哈希环（进环会把 1/N 房间分给没有业务逻辑的进程）；`ws.py` 去掉 `GameService` 依赖,推送等级改由 `core/ws_tier.py` 只读 Redis 快照判定；职责边界用 AST 断言钉住（DEVLOG 024）
 - [x] 连接 → 网关节点映射存 Redis（简历说的"Redis 路由表"）：房间 → 持有其连接的节点集合,节点粒度登记,TTL 兜底崩溃残留
 - [x] 跨节点扇出：查路由表定向 publish 到目标节点专属频道（不广播全集群）,本节点直发不绕 Redis,收到转发只做本地投递防环。11 项测试（DEVLOG 020）
 - [x] 同 Tick 事件合并帧：50ms 合并窗口内同房间多个 STATE_UPDATE 只下发最后一帧,合并率看 `ws_frames_merged / ws_frames_sent`（DEVLOG 021）

@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     # 跨节点转发超时：只覆盖"转发"这一跳，业务处理本身在归属节点上计时
     ROOM_FORWARD_TIMEOUT: float = 10.0
 
+    # WS 网关身份（见 app/gateway.py）。刻意与 NODE_ID 分开：
+    # 网关和业务节点各自订阅"自己 id 的专属频道"，同机部署时若共用一个 id，
+    # 两个进程会抢同一个频道，且都以为自己持有该房间的连接。
+    GATEWAY_ID: str = ""
+
     # AI
     AI_USE_LLM: bool = True  # False 时 AI 直接走规则引擎：压测专用，避免 LLM 延迟与成本污染数据
     AI_TASK_RATE_LIMIT: str = "60/m"  # AI 任务限流：v1 为保护 LLM 配额所设；压测时调高（如 100000/m）

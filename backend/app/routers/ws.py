@@ -1,10 +1,19 @@
 """
 这个文件定义了 WebSocket 路由，处理实时对局连接、鉴权与消息转发。
+
+职责边界（E-5 网关拆分后收紧）：这里只有三件事——连接维持、握手鉴权、消息转发。
+这个 router 会被两个进程挂载：业务进程 app/main.py 和独立网关 app/gateway.py。
+所以它**不许 import 业务层**（GameService / ORM 模型 / 规则引擎 / Celery）：
+网关进程只该拿着 socket，把业务依赖拉进去，它就会跟着业务代码一起崩、一起重启，
+而重启网关意味着所有长连接同时掉线——那正是拆分要消除的代价。
+唯一需要的对局信息是"这个人有没有座位"（定推送等级），已收敛到 ws_tier，只读快照。
 """
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query, status, HTTPException
 from jose import jwt, JWTError
 
-from app.core.socket_manager import manager, Tier
+from app.core.socket_manager import manager
+from app.core.redis import redis_client
+from app.core.ws_tier import resolve_tier
 from app.db.base import SessionLocal
 from app.core.config import settings
 from app.models.user import User
@@ -54,19 +63,8 @@ async def websocket_endpoint(
     连接地址: /api/v1/ws/games/{game_id}?token={jwt_token}
     """
     # 分级推送：有座位的是玩家（即时收帧），没座位的是旁观者（聚合批量收）。
-    # 判据用"是否占座"而不是让客户端自己声明角色——否则任何人都能声明成玩家，
-    # 把本该聚合的流量提成即时流量。
-    tier = Tier.SPECTATOR
-    try:
-        from app.services.game_service import GameService
-
-        game = await GameService.load_game(game_id)
-        if game and any(p.user_id == user.id for p in game.players):
-            tier = Tier.PLAYER
-    except Exception:
-        # 查不到房间不该挡住连接（可能刚建局还没落地），按旁观者接进来即可
-        pass
-
+    # 判据从 Redis 快照读，不走 GameService——网关进程不能背着业务层跑（见模块头）。
+    tier = await resolve_tier(redis_client, game_id, user.id)
     await manager.connect(websocket, game_id, user_id=user.id, tier=tier)
     
     try:
