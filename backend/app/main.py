@@ -8,7 +8,9 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from app.core.redis import redis_pool
 from app.core import metrics  # noqa: F401  # 导入即注册自定义指标到 /metrics
 from app.core.event_flusher import flusher_loop
+from app.core import pool_probe
 from app.core.tracing import TraceIdMiddleware, setup_logging
+from app.db.base import engine
 from app.routers import auth, game, ws, users
 
 @asynccontextmanager
@@ -18,8 +20,12 @@ async def lifespan(app: FastAPI):
     await FastAPILimiter.init(redis_client)
     # 启动 Write-Behind 批量刷库器（事件 Stream → MySQL）
     flusher_task = asyncio.create_task(flusher_loop())
+    # DB 连接池泄漏探针（默认关闭，DB_POOL_PROBE=true 时启用，压测排障用）
+    probe_task = pool_probe.start(engine, label="main")
     yield
     flusher_task.cancel()
+    if probe_task:
+        probe_task.cancel()
     await redis_client.close()
 
 app = FastAPI(
