@@ -101,6 +101,16 @@ rank_reads = Counter(
     ["result"],
 )
 
+# ---- 降级开关 ----
+# 每个开关当前是否处于降级态（1 = 已降级）。name 是开关名，低基数。
+# 降级动作本身必须可观测：不上报的话，复盘时分不清"AI 没说话"是因为降级了
+# 还是因为坏了——那就是一次没人知道的静默变更。
+degrade_switch = Gauge(
+    "aivalon_degrade_switch",
+    "Degradation switch state (1 = degraded)",
+    ["name"],
+)
+
 # ---- AI 链路 ----
 # AI 队列积压深度（周期性从 broker 读取）
 ai_queue_depth = Gauge(

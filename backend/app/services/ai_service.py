@@ -10,19 +10,25 @@ from app.models.game_enums import GamePhase, ActionType, VoteOption, MissionResu
 from app.core.game_rules import GameRuleValidator
 from app.services.llm_service import LLMService
 from app.core.ai_personas import get_persona_by_seat
-from app.core.config import settings
+from app.core import switches
 
 class AIService:
     @staticmethod
-    async def get_action(game: GameState, player: PlayerState) -> Optional[Dict[str, Any]]:
+    async def get_action(game: GameState, player: PlayerState,
+                        redis_conn=None) -> Optional[Dict[str, Any]]:
         """
         获取 AI 玩家的下一步动作
+
+        `redis_conn`：读降级开关用。**必须由调用方传进来**，不能用全局单例——
+        这个方法跑在 Celery worker 里，那边每个任务都新建一个 event loop，
+        全局客户端会复用绑到已关闭 loop 的连接（同 tasks/ai.py 里那个注释）。
         """
         if not player.is_ai:
             return None
 
-        # 压测模式：直接走规则引擎，不调 LLM（避免延迟与成本污染压测数据）
-        if not settings.AI_USE_LLM:
+        # 走不走 LLM 是**运行时**开关，不是启动时配置：见 core/switches.py。
+        # 开关默认值仍取自 settings.AI_USE_LLM，所以压测那套环境变量照旧有效。
+        if not await switches.ai_use_llm(redis_conn):
             return AIService._get_fallback_action(game, player)
 
         try:

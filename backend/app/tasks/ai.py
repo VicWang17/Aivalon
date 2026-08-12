@@ -67,7 +67,10 @@ def process_ai_turn(self, game_id: str, player_id: int):
                     raise ValueError(f"Player {player_id} not found")
                     
                 # 3. AI 决策
-                action = await AIService.get_action(game_state, player)
+                # 把这个 loop 自己的 redis 连接传下去：AI 要读降级开关，
+                # 而全局单例客户端在这里会踩到"绑到已关闭 loop 的连接"（同上面那段注释）
+                action = await AIService.get_action(game_state, player,
+                                                   redis_conn=redis_conn)
                 return action
             finally:
                 await redis_conn.close()

@@ -17,7 +17,7 @@ from app.core import pool_probe
 from app.core import socket_manager
 from app.core.tracing import TraceIdMiddleware, setup_logging
 from app.db.base import engine
-from app.routers import auth, game, ws, users
+from app.routers import admin, auth, game, ws, users
 from app.services.game_service import GameService
 from app.services.rank_service import RankService
 
@@ -96,6 +96,8 @@ app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(game.router, prefix="/api/v1/games", tags=["games"])
 app.include_router(ws.router, prefix="/api/v1/ws", tags=["websocket"])
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
+# 降级开关操作入口。内部密钥鉴权，不进 OpenAPI 文档（见 routers/admin.py）
+app.include_router(admin.router, prefix="/internal", tags=["internal"])
 
 @app.get("/")
 async def root():
