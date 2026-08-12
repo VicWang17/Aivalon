@@ -76,7 +76,7 @@ python -m app.core.outbox_relay &
 
 - [x] L1 进程内 + L2 Redis 两级缓存,未命中回源 MySQL：`core/cache.py`,加在**回放事件流**读路径（全站唯一真回源 MySQL 的接口,且事件只增不改）。**刻意不加在对局状态路径**——那里的 `games` 是 Actor 权威状态,非归属节点留副本会重现 DEVLOG 018 对局回退。L1 有条数上限 + TTL 即一致性上限,指标 `cache_reads{level}`（DEVLOG 025）
 - [x] 事件驱动失效 + TTL 兜底：Pub/Sub 失效通道补上 L1 跨进程失效不了的洞（L2 共享删一次即可,L1 在各进程堆里得喊一声）。**失效点挂在 flusher 刷库成功之后**,不在动作发生时——事件走 Write-Behind,提前失效会让读回源到还没刷入的 MySQL、把旧结果重新缓存 300s。失效失败不上抛,L1 短 TTL 才是保证（DEVLOG 026）
-- [ ] 穿透：布隆过滤器拦截不存在的 game_id / user_id
+- [x] 穿透：布隆过滤器拦截不存在的 game_id：`core/bloom.py`，md5 双哈希（内置 `hash()` 受 `PYTHONHASHSEED` 影响，跨进程算出不同位 → 共享位图失效，同 C05）。**能当门卫全靠误判单向**：只会误判"存在"，绝不误判"不存在"。三条工程约定维持"无假阴性"：空位图放行 / key 不设 TTL / 启动时位图不存在则灌一遍库里已有 id——少一条就会把真实房间 404 掉。拦截点放在**跨节点转发之前**（省掉一次往返），刻意不拦 `load_game`（AI 任务与快照恢复走它）。Redis 故障一律放行，指标 `bloom_rejects`（DEVLOG 027）
 - [ ] 击穿：热点快照 singleflight 互斥回源（验收就是"热 key 失效瞬间只回源 1 次",单测即可断言,不用压测）
 - [ ] 雪崩：逻辑过期异步重建 + TTL 随机抖动
 

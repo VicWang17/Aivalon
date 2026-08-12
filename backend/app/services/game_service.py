@@ -20,6 +20,7 @@ import json
 import copy
 from app.core.redis import redis_client
 from app.core.room_actor import actor_manager
+from app.core import bloom
 from app.core import cache
 from app.core import event_journal
 from celery import group
@@ -128,6 +129,11 @@ class GameService:
             winner=None,
             game_state=initial_state,
         )
+        # 登记进布隆过滤器：放在持久化成功之后，失败的建局不该被登记
+        # （登记了不存在的 id 只是让它以后拦不住，无害；漏登记真实房间会被误拦成 404，
+        #  所以宁可晚一点、也要确保只登记真的建成了的房间）
+        await bloom.add(redis_client, game_id)
+
         # 6. 持久化成功后才入内存（快照已随同一事务写入 Redis）
         #    只在房间归本节点时留内存副本：建局的节点不一定是房间的归属节点，
         #    非归属节点留下副本的后果是——等房间日后迁到它名下，process_action
@@ -708,6 +714,19 @@ class GameService:
                 GameModel.user_id == user_id
             ).order_by(GameModel.created_at.desc()).offset(skip).limit(limit).all()
             return games
+        finally:
+            db.close()
+
+    @staticmethod
+    def load_all_game_ids() -> List[str]:
+        """全量对局 id，只给布隆过滤器预热用（见 core/bloom.py 的 warm）。
+
+        只 select id 一列，不取整行：这张表有 player_ids / payload 之类的 JSON 字段，
+        整行拉回来传输量差好几个数量级，而预热只需要 id。
+        """
+        db = SessionLocal()
+        try:
+            return [row[0] for row in db.query(GameModel.id).all()]
         finally:
             db.close()
 

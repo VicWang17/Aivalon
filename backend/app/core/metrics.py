@@ -66,6 +66,13 @@ cache_reads = Counter(
     ["level", "result"],
 )
 
+# 被布隆过滤器拦掉的请求数（= 省下的无效回源次数）。
+# 这是防穿透唯一的验收口径：这个数在涨，说明确实有不存在的 id 在打进来且被挡住了。
+bloom_rejects = Counter(
+    "aivalon_bloom_rejects_total",
+    "Requests rejected by bloom filter (nonexistent ids, never reached DB)",
+)
+
 # ---- AI 链路 ----
 # AI 队列积压深度（周期性从 broker 读取）
 ai_queue_depth = Gauge(

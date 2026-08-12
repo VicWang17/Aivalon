@@ -7,13 +7,14 @@ import time
 from typing import List, Annotated
 from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Response
 from redis.asyncio import Redis
+from app.core import bloom
 from app.core import room_router
 from app.core.rate_limit import create_game_rate_limit, action_rate_limit
 from app.schemas.game import GameCreateRequest, GameCreateResponse, GameState, GameActionRequest, GameSummary, GameEventSchema, RecentGameSummary
 from app.services.game_service import GameService
 from app.services.rank_service import RankService
 from app.core.deps import get_current_user
-from app.core.redis import get_redis
+from app.core.redis import get_redis, redis_client
 from app.core.idempotency import IdempotencyManager
 from app.models.user import User
 from app.db.base import SessionLocal
@@ -203,6 +204,14 @@ async def get_game_events(
     这条路径是全站唯一每次都真的查 MySQL 的读接口，而回放事件只增不改，
     缓存起来没有一致性负担——新事件追加时由写路径失效（F-2）。
     """
+    # 布隆过滤器挡在缓存前面：这条路径的空结果虽然也会被缓存，但攻击者每次换一个
+    # 随机 id，每个 id 都是全新的 key、都要穿到 MySQL，缓存等于不存在（见 core/bloom.py）
+    if not await bloom.might_contain(redis_client, game_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Game not found"
+        )
+
     events = await GameService.get_game_events_cached(game_id)
     # 空列表照样返回 200：库里没事件不代表房间不存在（可能刚建局还没落盘），
     # 这里答 404 会让前端把"还没开始"误判成"房间不存在"
@@ -222,6 +231,15 @@ async def get_game_state(
     过期副本（例如建局节点留下的初始快照），读到它会让客户端永远看不到最新回合。
     多付一次集群内跳转，换来"读到的一定是刚写进去的那份"。
     """
+    # 布隆过滤器放在转发**之前**：不存在的 id 本来会先跨节点跳一次、再由目标节点答 404，
+    # 在这里拦掉等于连这一跳都省了。注意只拦这个 HTTP 入口，不拦 `load_game` 本身——
+    # AI 任务和快照恢复都依赖它，那些是内部调用，id 一定来自已存在的房间
+    if not await bloom.might_contain(redis_client, game_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Game not found"
+        )
+
     target = room_router.should_forward(game_id, request)
     if target:
         forwarded = await room_router.forward(target, request, b"")

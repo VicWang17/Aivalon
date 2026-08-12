@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi_limiter import FastAPILimiter
 from prometheus_fastapi_instrumentator import Instrumentator
 from app.core.redis import redis_pool
+from app.core import bloom
 from app.core import cache
 from app.core import metrics  # noqa: F401  # 导入即注册自定义指标到 /metrics
 from app.core.event_flusher import flusher_loop
@@ -16,6 +17,7 @@ from app.core import socket_manager
 from app.core.tracing import TraceIdMiddleware, setup_logging
 from app.db.base import engine
 from app.routers import auth, game, ws, users
+from app.services.game_service import GameService
 
 logger = logging.getLogger("aivalon.main")
 
@@ -40,6 +42,13 @@ async def lifespan(app: FastAPI):
     # 缓存失效广播：L2 是共享的删一次就够，L1 在各进程自己堆里，得喊一声让大家清
     cache.bind(redis_client)
     cache.start()
+    # 布隆过滤器预热：位图不存在时才灌一遍库里已有的对局 id。
+    # 这不是性能优化——过滤器上线前建的房间没登记过，位图一旦非空就会把它们判成
+    # "不存在"，直接 404 掉真实房间（见 app/core/bloom.py 的 warm）。
+    # 刻意同步 await、不丢后台：预热要是慢慢在后台跑，期间来一次建局就把位图写成非空，
+    # 预热任务的 `exists` 检查随即返回真、直接跳过——老房间就永远没登记上了。
+    # 代价是启动多花一次全表扫 id 的时间，换的是"开始拦之前一定登记齐了"。
+    await bloom.warm(redis_client, GameService.load_all_game_ids)
     # DB 连接池泄漏探针（默认关闭，DB_POOL_PROBE=true 时启用，压测排障用）
     probe_task = pool_probe.start(engine, label="main")
     yield
