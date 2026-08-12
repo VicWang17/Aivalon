@@ -11,6 +11,7 @@ from app.core.game_rules import GameRuleValidator
 from app.services.llm_service import LLMService
 from app.core.ai_personas import get_persona_by_seat
 from app.core import switches
+from app.core.config import settings
 
 class AIService:
     @staticmethod
@@ -354,10 +355,13 @@ class AIService:
         print(f"\n[{player.username} ({action_str})] --- AI THINKING ---")
         
         try:
-            # 根据阶段设置超时时间
-            # 发言阶段允许更长时间思考
-            timeout = 45 if action_str == "SPEAK" else 20
-            
+            # 分阶段的超时上界：发言要生成一整段话所以给得宽，
+            # 投票/提名只输出几个数字，20 秒还不出就是不正常。
+            # 这是**整次调用**的上界（`generate_response` 用 wait_for 兜住），
+            # 不是单次尝试的——原来那个 timeout 只约束 SDK 的一跳，而 SDK 默认还会重试 2 次。
+            timeout = (settings.AI_LLM_TIMEOUT_SPEECH if action_str == "SPEAK"
+                       else settings.AI_LLM_TIMEOUT_ACTION)
+
             result = await LLMService.generate_response(
                 system_prompt, 
                 user_prompt, 

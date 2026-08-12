@@ -118,14 +118,21 @@ ai_queue_depth = Gauge(
     "Pending tasks in AI queue",
 )
 
-# LLM 调用（结果：success / fallback / error）
+# LLM 调用结果。四档刻意分开，因为它们要采取的行动不同：
+#   success —— 正常
+#   timeout —— 依赖**慢了**：该考虑降级或扩容
+#   invalid —— 依赖**坏了**（通了但返回的不是合法 JSON）：该去改 prompt
+#   error   —— 其他失败（鉴权、配额、网络）
+# 混成一个 "fallback" 档的话，事故里分不清该扩容还是该改 prompt。
 llm_calls_total = Counter(
     "aivalon_llm_calls_total",
     "LLM invocations by result",
     ["result"],
 )
 
-# LLM 调用耗时（秒）
+# LLM 调用耗时（秒）。**失败和超时的耗时也要记进来**——只记成功的话，
+# LLM 全在超时的时候这条曲线反而会变好看（慢的都没被统计），
+# 于是最需要告警的时刻指标一片绿。
 llm_latency = Histogram(
     "aivalon_llm_latency_seconds",
     "LLM call latency",

@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     # AI
     AI_USE_LLM: bool = True  # False 时 AI 直接走规则引擎：压测专用，避免 LLM 延迟与成本污染数据
     AI_TASK_RATE_LIMIT: str = "60/m"  # AI 任务限流：v1 为保护 LLM 配额所设；压测时调高（如 100000/m）
+    # LLM 舱壁：单次调用的**整体**上界（秒），超时即回落规则引擎（见 services/llm_service.py）。
+    # 发言给得宽是因为它要生成一整段话；投票/提名只输出几个数字，20 秒还不出就是不正常。
+    # 这两个值是可调的：事故里把它们压小，就是"宁可 AI 说套话也别让玩家等"。
+    AI_LLM_TIMEOUT_SPEECH: float = 45.0
+    AI_LLM_TIMEOUT_ACTION: float = 20.0
 
     @property
     def CELERY_BROKER_URL(self) -> str:
