@@ -20,6 +20,7 @@ import json
 import copy
 from app.core.redis import redis_client
 from app.core.room_actor import actor_manager, RoomActionTimeout, RoomOverloaded
+from app.core import ai_queue
 from app.core import bloom
 from app.core import cache
 from app.core import event_journal
@@ -227,10 +228,13 @@ class GameService:
                 should_act = True
                 
             if should_act:
-                # 投递任务到 Celery
+                # 投递任务到 Celery。登记一笔"在飞任务"，token 随任务带下去供注销用——
+                # **深度必须在投递侧记账**：等 worker 领到任务才记的话，积压期间
+                # 队列里躺着的任务一个都不算，深度永远看着很小，而那正是要看的东西。
+                token, _ = await ai_queue.enter(redis_client)
                 print(f"[GameService] Scheduling AI task for {player.username} ({player.user_id})")
-                ai_tasks.append(process_ai_turn.s(game_id, player.user_id))
-                
+                ai_tasks.append(process_ai_turn.s(game_id, player.user_id, token))
+
                 # 如果是投票或任务阶段，所有 AI 可以并行行动
                 # 如果是发言或提名，通常是串行的
                 if game.phase not in [GamePhase.VOTE, GamePhase.MISSION]:

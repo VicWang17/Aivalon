@@ -146,10 +146,22 @@ degrade_switch = Gauge(
 )
 
 # ---- AI 链路 ----
-# AI 队列积压深度（周期性从 broker 读取）
+# 在飞的 AI 任务数（投递时登记、跑完注销，见 app/core/ai_queue.py）。
+# 各进程写的都是从 Redis 读回来的同一个数，所以多进程下不会互相打架。
+# 这是资源层下半的核心口径：它持续高于降级阈值就说明 worker 跟不上投递速度。
 ai_queue_depth = Gauge(
     "aivalon_ai_queue_depth",
-    "Pending tasks in AI queue",
+    "In-flight AI turns (dispatched but not yet finished)",
+)
+
+# 因队列积压而被降级（摘掉 LLM 走规则引擎）的 AI 回合数。
+# **自动降级尤其必须可观测**：人手切开关时至少有人知道自己切了，
+# 按深度自动触发的降级没人按过按钮——不上报的话，"AI 怎么突然开始说套话了"
+# 在复盘时根本无从查起（同 H-1 那条：降级动作不可观测就是静默变更）。
+ai_turns_degraded = Counter(
+    "aivalon_ai_turns_degraded_total",
+    "AI turns forced to the rule engine by resource pressure",
+    ["reason"],
 )
 
 # LLM 调用结果。四档刻意分开，因为它们要采取的行动不同：

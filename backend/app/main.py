@@ -8,6 +8,7 @@ from fastapi_limiter import FastAPILimiter
 from prometheus_fastapi_instrumentator import Instrumentator
 from app.core.redis import redis_pool
 from app.core import admission
+from app.core import ai_queue
 from app.core import bloom
 from app.core import cache
 from app.core import metrics  # noqa: F401  # 导入即注册自定义指标到 /metrics
@@ -35,6 +36,9 @@ async def lifespan(app: FastAPI):
     admission.bind(redis_client)
     # 应用层滑动窗口的脚本注册。同样没 bind 就放行
     sliding_window.bind(redis_client)
+    # AI 队列深度记账的脚本注册。没 bind 时深度报 0 = 不降级
+    # （Celery worker 那边不跑 lifespan，它自己就地注册，见 ai_queue._resolve）
+    ai_queue.bind(redis_client)
     # 启动 Write-Behind 批量刷库器（事件 Stream → MySQL）
     flusher_task = asyncio.create_task(flusher_loop())
     # 集群节点注册 + 心跳：维护房间路由的一致性哈希环。

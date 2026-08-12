@@ -7,6 +7,7 @@ from app.models.game import Game
 from app.schemas.game import GameState, PlayerState
 from app.models.game_enums import Character, Camp, GamePhase
 from app.core.config import settings
+from app.core import ai_queue
 from app.core.redis import redis_pool
 import redis.asyncio as redis
 import asyncio
@@ -14,9 +15,13 @@ import json
 import requests
 
 @celery_app.task(bind=True, queue="ai_queue", max_retries=5, rate_limit=settings.AI_TASK_RATE_LIMIT)
-def process_ai_turn(self, game_id: str, player_id: int):
+def process_ai_turn(self, game_id: str, player_id: int, queue_token: str = ""):
     """
     处理 AI 玩家的回合
+
+    `queue_token`：投递侧登记的"在飞任务"凭据（见 core/ai_queue.py），跑完注销。
+    **给默认值是为了兼容已经躺在队列里的老任务**——改任务签名时队列里可能还有
+    上一版投递的消息，少一个参数就是一批 TypeError 直接进死信队列。
     """
     print(f"[AI Task] Processing turn for game {game_id}, player {player_id}")
     
@@ -33,6 +38,7 @@ def process_ai_turn(self, game_id: str, player_id: int):
         print(f"[AI Task] Failed to broadcast thinking state: {e}")
 
     db = SessionLocal()
+    retrying = False
     try:
         # 运行异步代码
         loop = asyncio.new_event_loop()
@@ -50,6 +56,15 @@ def process_ai_turn(self, game_id: str, player_id: int):
                 encoding="utf-8"
             )
             try:
+                # 队列积压到阈值就摘掉 LLM 走规则引擎。**判断放在 worker 里而不是投递侧**：
+                # 投递到执行之间隔着排队，积压期间那段间隔正是最长的——
+                # 用投递那一刻的深度决定，等于拿几十秒前的旧情况做现在的决定。
+                depth = await ai_queue.depth(redis_conn)
+                degrade = ai_queue.should_degrade(depth)
+                if degrade:
+                    ai_queue.note_degraded()
+                    print(f"[AI Task] 队列深度 {depth} 已达阈值，本回合走规则引擎")
+
                 # 1. 恢复游戏状态
                 game_state = await GameService.restore_game_state(game_id, db, redis_conn=redis_conn)
                 
@@ -70,7 +85,8 @@ def process_ai_turn(self, game_id: str, player_id: int):
                 # 把这个 loop 自己的 redis 连接传下去：AI 要读降级开关，
                 # 而全局单例客户端在这里会踩到"绑到已关闭 loop 的连接"（同上面那段注释）
                 action = await AIService.get_action(game_state, player,
-                                                   redis_conn=redis_conn)
+                                                   redis_conn=redis_conn,
+                                                   force_fallback=degrade)
                 return action
             finally:
                 await redis_conn.close()
@@ -110,12 +126,18 @@ def process_ai_turn(self, game_id: str, player_id: int):
     except Exception as e:
         print(f"[AI Task] Error processing game {game_id}: {e}")
         db.rollback()
-        
+
         # 指数退避重试策略
         # 第1次: 2s, 第2次: 4s, 第3次: 8s, 第4次: 16s, 第5次: 32s
         retry_delay = 2 ** (self.request.retries + 1)
         print(f"[AI Task] Retrying in {retry_delay}s (Attempt {self.request.retries + 1}/{self.max_retries})...")
-        
+
+        # 重试意味着这个 AI 回合**还没完成**，所以不注销（下面的 finally 据此跳过）：
+        # 注销了的话，等待重试的这段时间它不算在深度里，而正在重试的任务恰恰是
+        # 积压的一部分——**漏算会让深度在最需要它的时候偏小**。
+        retrying = True
         raise self.retry(exc=e, countdown=retry_delay)
     finally:
         db.close()
+        if not retrying:
+            ai_queue.leave_sync(queue_token)

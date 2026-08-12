@@ -16,20 +16,26 @@ from app.core.config import settings
 class AIService:
     @staticmethod
     async def get_action(game: GameState, player: PlayerState,
-                        redis_conn=None) -> Optional[Dict[str, Any]]:
+                        redis_conn=None,
+                        force_fallback: bool = False) -> Optional[Dict[str, Any]]:
         """
         获取 AI 玩家的下一步动作
 
         `redis_conn`：读降级开关用。**必须由调用方传进来**，不能用全局单例——
         这个方法跑在 Celery worker 里，那边每个任务都新建一个 event loop，
         全局客户端会复用绑到已关闭 loop 的连接（同 tasks/ai.py 里那个注释）。
+
+        `force_fallback`：本回合强制走规则引擎，由调用方按资源压力判定
+        （见 core/ai_queue.py）。**和开关分开两个入口**：开关是人做的全局决定、
+        要留到人来撤销；这个是按当前队列深度**每回合重新判断**的，压力一退就自动恢复。
+        混成一个的话，自动降级会把人手切的开关覆盖掉，或者反过来自动降级撤不回去。
         """
         if not player.is_ai:
             return None
 
         # 走不走 LLM 是**运行时**开关，不是启动时配置：见 core/switches.py。
         # 开关默认值仍取自 settings.AI_USE_LLM，所以压测那套环境变量照旧有效。
-        if not await switches.ai_use_llm(redis_conn):
+        if force_fallback or not await switches.ai_use_llm(redis_conn):
             return AIService._get_fallback_action(game, player)
 
         try:
