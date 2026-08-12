@@ -134,11 +134,87 @@ async def get_or_load(
             l1.set(key, value, ttl=l1_ttl)
             return value
 
-    metrics.cache_reads.labels(level="db", result="miss").inc()
-    value = loader()
-    if asyncio.iscoroutine(value):
-        value = await value
+    return await _load_once(key, loader, redis=redis, l1_ttl=l1_ttl, l2_ttl=l2_ttl)
 
+
+# ----------------------------------------------------------------------
+# singleflight：热 key 失效瞬间只回源一次
+# ----------------------------------------------------------------------
+#
+# 缓存击穿：一个被高频读的 key 恰好过期（或被失效）的那一瞬间，所有正在读它的请求
+# 同时发现未命中，于是**同时**回源。缓存平时挡住的那些 QPS，会在这一刻原封不动地
+# 砸到 MySQL 上。key 越热，砸得越狠——热点是它的前提，不是它的缓解因素。
+# 好比一家只有一个窗口的银行，牌子上写"暂停营业"的那一秒，排队的人全涌到窗口问
+# "什么时候开"——问的人越多，窗口越开不了。
+#
+# 和穿透（F-3）的区别：穿透查的是**根本不存在**的东西，布隆过滤器能在门口拦掉；
+# 击穿查的是**真实存在且很热**的东西，拦不得也拦不掉，只能让它们**共享一次回源**。
+#
+# 做法就是 singleflight：同一个 key 的并发回源，第一个进来的真去查，
+# 后来的都挂在它的 future 上等结果。N 个并发请求 → 1 次查询 + N-1 次等待。
+#
+# 边界要说清楚：这是**进程内**互斥，不是集群级互斥。
+# M 个进程各自回源一次，最坏 M 次而不是 1 次。没上分布式锁是因为代价不对等——
+# 分布式锁要在**每次未命中的路径上**多付一次 Redis 往返，还会引入新的故障模式
+# （持锁者崩了，其他进程得等锁超时；锁超时设短了又会退化成没锁）。
+# 而未命中本来就是低频事件，M（进程数，个位数）远小于 N（并发请求数）。
+# **把 N 压到 1 是数量级的改善，把 M 压到 1 是常数级的改善，代价却高得多。**
+
+# key → 正在进行的回源。用 future 而不是锁：锁只能让后来者排队"再查一次"，
+# future 能让它们直接拿到第一次的结果——目标是少查，不是排队查。
+_inflight: Dict[str, asyncio.Future] = {}
+
+
+async def _load_once(
+    key: str,
+    loader: Callable[[], Any],
+    redis=None,
+    l1_ttl: float = L1_TTL,
+    l2_ttl: int = L2_TTL,
+) -> Any:
+    """回源并回填两级缓存。同一个 key 并发进来时只有第一个真的回源。"""
+    # 二次检查 L1。调用方查 L1 未命中之后还 await 过一次 L2 读，那期间足够别的任务
+    # 完整跑完一次回源并回填——尤其 loader 是同步函数时，它从头到尾不让出事件循环，
+    # 等这个任务被调度回来时"正在回源"的痕迹已经没了，不重查 L1 就会白查一次库。
+    hit, value = l1.get(key)
+    if hit:
+        metrics.cache_reads.labels(level="l1", result="hit").inc()
+        return value
+
+    existing = _inflight.get(key)
+    if existing is not None:
+        metrics.cache_reads.labels(level="singleflight", result="coalesced").inc()
+        # 必须 shield：直接 `await existing` 时，如果这个等待者的 task 被取消
+        # （比如客户端断开），取消会顺着传到共享的 future 上，把**正在回源的那个人**
+        # 和其他所有等待者一起打断。shield 让取消只作用于当前等待者。
+        return await asyncio.shield(existing)
+
+    fut = asyncio.get_running_loop().create_future()
+    _inflight[key] = fut
+    try:
+        metrics.cache_reads.labels(level="db", result="miss").inc()
+        value = loader()
+        if asyncio.iscoroutine(value):
+            value = await value
+    except BaseException as e:
+        # 用 BaseException 是因为 CancelledError 在 3.8+ 不是 Exception 的子类，
+        # 而回源被取消时同样必须把等待者放掉——否则它们会一直挂在这个永不完成的
+        # future 上，一个客户端断开就能拖死同一个 key 的所有读请求
+        _inflight.pop(key, None)
+        if not fut.done():
+            fut.set_exception(e)
+            # 没有等待者时，未被取用的异常会被 asyncio 打成 "exception was never
+            # retrieved" 警告刷日志。这里主动取一次消掉它（fut 只会 set_exception、
+            # 不会被 cancel，所以这个调用本身是安全的）
+            fut.exception()
+        raise
+
+    if not fut.done():
+        fut.set_result(value)
+    _inflight.pop(key, None)
+
+    # 回填放在结果交付之后：等待者拿的是同一个值，不必等两级缓存写完。
+    # 也只有回源者写缓存——等待者跟着写就是 N-1 次重复写。
     if redis is not None:
         try:
             await redis.set(key, json.dumps(value, default=str), ex=l2_ttl)

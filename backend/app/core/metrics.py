@@ -57,9 +57,11 @@ game_action_latency = Histogram(
 )
 
 # ---- 缓存 ----
-# 各级缓存的命中/未命中。level 取 l1 / l2 / db，都是低基数维度。
+# 各级缓存的命中/未命中。level 取 l1 / l2 / db / singleflight，都是低基数维度。
 # 这是多级缓存唯一的验收口径：L1 命中率说明进程内缓存值不值得，
 # db 那一档的增速就是真实回源 QPS。
+# singleflight 那一档是"被合并掉的回源"——它和 db 档的比值就是防击穿的收益，
+# 热 key 失效瞬间来了 N 个并发，应该看到 db +1 而 singleflight +(N-1)。
 cache_reads = Counter(
     "aivalon_cache_reads_total",
     "Cache reads by level and result",
