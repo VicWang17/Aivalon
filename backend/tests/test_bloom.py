@@ -176,6 +176,23 @@ def test_offsets_are_deterministic():
     assert all(0 <= off < bloom.BITS for off in a)
 
 
+def test_offsets_do_not_collapse():
+    """k 个位置必须真的是 k 个不同的位。
+
+    双哈希法里 h2 强制成奇数就是为了这个：BITS 是 2 的幂，如果 h2 和它有公因子，
+    `h1 + i*h2` 取模后会周期性重复，k=7 实际只点亮两三个位——
+    误判率会悄悄涨上去，而功能表面上完全正常，属于不测就发现不了的那类问题。
+    """
+    for value in ("game-abc", "game-xyz", "game-1", "game-2"):
+        offsets = bloom._offsets(value)
+        assert len(set(offsets)) == bloom.HASHES, f"位置塌缩了: {value} -> {offsets}"
+
+
+def test_different_values_get_different_offsets():
+    """不同的值该落在不同的位上，否则位图区分不了它们。"""
+    assert bloom._offsets("game-1") != bloom._offsets("game-2")
+
+
 def test_offsets_do_not_depend_on_pythonhashseed():
     """位图是跨进程共享的，各进程算出的位必须一致。
 
