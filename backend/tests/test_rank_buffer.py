@@ -19,7 +19,8 @@ import redis.asyncio as aioredis
 from app.core import metrics, rank_buffer
 
 NODE = "test-node"
-BOARDS = list(rank_buffer.BOARD_KEYS.values())
+# 每个榜现在是 SHARDS 个 ZSET，清理要把所有片都算上
+ALL_SHARDS = [k for b in rank_buffer.BOARDS for k in rank_buffer.shard_keys(b)]
 
 
 def _redis_ok() -> bool:
@@ -39,7 +40,7 @@ async def redis():
 
     async def _clean():
         await client.delete(
-            rank_buffer.PENDING_KEY, f"{rank_buffer.DRAINING_PREFIX}{NODE}", *BOARDS
+            rank_buffer.PENDING_KEY, f"{rank_buffer.DRAINING_PREFIX}{NODE}", *ALL_SHARDS
         )
 
     await _clean()
@@ -49,7 +50,12 @@ async def redis():
 
 
 async def _score(redis, board, member) -> float:
-    raw = await redis.zscore(rank_buffer.BOARD_KEYS[board], str(member))
+    """从**该 member 所属的那一片**里读分数。
+
+    分数只可能在这一片里——这就是按 member 分片的意思。如果这里得去所有片
+    加一遍才拿得到分数，说明分片键选错了（见 rank_buffer 文件头）。
+    """
+    raw = await redis.zscore(rank_buffer.key_for_member(board, str(member)), str(member))
     return float(raw) if raw is not None else 0.0
 
 
@@ -239,10 +245,21 @@ async def test_merge_ratio_metrics(redis):
     assert metrics.rank_updates_applied._value.get() == applied_before + 1
 
 
-def test_boards_are_defined_in_one_place():
-    """读路径的 key 必须和写路径同源。两处各写一遍字面量早晚写歪，
-    而写歪的表现是"榜看起来是空的"——写进了一个没人读的 key。"""
-    from app.services import rank_service
-    assert rank_service.KEY_LEADERBOARD_TOTAL == rank_buffer.BOARD_KEYS["total"]
-    assert rank_service.KEY_LEADERBOARD_GOOD == rank_buffer.BOARD_KEYS["good"]
-    assert rank_service.KEY_LEADERBOARD_EVIL == rank_buffer.BOARD_KEYS["evil"]
+def test_shard_assignment_is_stable_across_processes():
+    """分片必须用 md5 不能用内置 `hash()`。
+
+    `hash()` 受 `PYTHONHASHSEED` 影响，每个进程算出来的值不同，而**写入的进程和
+    归并的进程不是同一个**——写进 s3 的人在 s5 里被找，等于数据凭空消失。
+    同 DEVLOG C05 那个一致性哈希的盐坑。这里钉住几个已知值。
+    """
+    assert rank_buffer.shard_of("42") == rank_buffer.shard_of("42")
+    # 换算方式变了这条就会红，提醒你顺便想清楚存量数据怎么迁
+    assert rank_buffer.shard_of("42") == int(
+        __import__("hashlib").md5(b"42").hexdigest()[:8], 16
+    ) % rank_buffer.SHARDS
+
+
+def test_members_spread_across_shards():
+    """分片得真的把人摊开。全落一片的话分片只是白加了一层复杂度。"""
+    used = {rank_buffer.shard_of(str(i)) for i in range(200)}
+    assert len(used) == rank_buffer.SHARDS, f"只用到了 {len(used)} 片"

@@ -91,6 +91,16 @@ rank_updates_applied = Counter(
     "ZINCRBY commands actually issued after merging",
 )
 
+# 榜单读的来源：snapshot（读到归并快照）/ merged（快照没有，当场归并兜底）。
+# 这是"定时归并"的验收口径：merged 那一档应该几乎不涨——它只在冷启动和
+# 快照过期时出现。如果它跟着读 QPS 一起涨，说明归并循环没在跑，
+# 每次读都在当场归并，等于这层优化根本没生效。
+rank_reads = Counter(
+    "aivalon_rank_reads_total",
+    "Leaderboard reads by source",
+    ["result"],
+)
+
 # ---- AI 链路 ----
 # AI 队列积压深度（周期性从 broker 读取）
 ai_queue_depth = Gauge(

@@ -19,6 +19,7 @@ from app.core.tracing import TraceIdMiddleware, setup_logging
 from app.db.base import engine
 from app.routers import auth, game, ws, users
 from app.services.game_service import GameService
+from app.services.rank_service import RankService
 
 logger = logging.getLogger("aivalon.main")
 
@@ -50,6 +51,11 @@ async def lifespan(app: FastAPI):
     rank_task = asyncio.create_task(
         rank_buffer.drain_loop(redis_client, cluster.node_id)
     )
+    # 榜单定时归并：把 8 个分片各取 Top N 合成一份带展示字段的快照。
+    # 归并次数由间隔决定、和读 QPS 无关，这是"定时归并"相对"每次读都归并"的全部意义。
+    # 不像上面的刷榜循环那样需要 node_id：归并是读 + 覆盖写，多节点重复做只是浪费 CPU
+    # 不会算错，所以刻意不做互斥（见 RankService.merge_loop）。
+    merge_task = asyncio.create_task(RankService.merge_loop(redis_client))
     # 布隆过滤器预热：位图不存在时才灌一遍库里已有的对局 id。
     # 这不是性能优化——过滤器上线前建的房间没登记过，位图一旦非空就会把它们判成
     # "不存在"，直接 404 掉真实房间（见 app/core/bloom.py 的 warm）。
@@ -62,6 +68,7 @@ async def lifespan(app: FastAPI):
     yield
     flusher_task.cancel()
     rank_task.cancel()
+    merge_task.cancel()
     if probe_task:
         probe_task.cancel()
     await socket_manager.manager.stop()

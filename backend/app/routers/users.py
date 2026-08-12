@@ -21,23 +21,8 @@ async def get_leaderboard(
     """
     获取排行榜 (使用 Redis 缓存加速)
     """
-    users = await RankService.get_leaderboard(type, limit)
-    
-    results = []
-    for u in users:
-        win_rate = 0.0
-        if u.total_games > 0:
-            win_rate = u.total_wins / u.total_games
-            
-        entry = LeaderboardEntry(
-            user_id=u.id,
-            username=u.username,
-            total_games=u.total_games,
-            wins_good=u.wins_good,
-            wins_evil=u.wins_evil,
-            total_wins=u.total_wins,
-            win_rate=round(win_rate * 100, 1)
-        )
-        results.append(entry)
-        
-    return ResponseModel(data=results)
+    # 归并快照里已经带着展示字段了（用户名、场次、胜率），这里不再逐个查库拼装——
+    # 原来这个接口每次请求都要拿着榜上的 id 去 MySQL 查一遍，
+    # 等于榜单 QPS 直接压在库上。见 rank_service.py 读路径那段说明。
+    entries = await RankService.get_leaderboard(type, limit)
+    return ResponseModel(data=[LeaderboardEntry(**e) for e in entries])
