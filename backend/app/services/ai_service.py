@@ -10,7 +10,7 @@ from app.models.game_enums import GamePhase, ActionType, VoteOption, MissionResu
 from app.core.game_rules import GameRuleValidator
 from app.services.llm_service import LLMService
 from app.core.ai_personas import get_persona_by_seat
-from app.core import switches
+from app.core import degrade, metrics, switches
 from app.core.config import settings
 
 class AIService:
@@ -33,9 +33,30 @@ class AIService:
         if not player.is_ai:
             return None
 
-        # 走不走 LLM 是**运行时**开关，不是启动时配置：见 core/switches.py。
-        # 开关默认值仍取自 settings.AI_USE_LLM，所以压测那套环境变量照旧有效。
-        if force_fallback or not await switches.ai_use_llm(redis_conn):
+        # 摘掉 LLM 的四条独立通路，**任一成立就走规则引擎**。
+        # 取"或"是安全的合并方式：这几个入口的意图都是"这一刀砍下去"，
+        # 谁都不该被别人的"不用降"覆盖掉——**降级判定要偏向已经生效的那个决定**。
+        #   1. force_fallback：队列深度自动触发（每回合重判，压力退了自动恢复）
+        #   2. switches.ai_use_llm：人手点名关掉（H-1，要留到人来撤销）
+        #   3. 降级矩阵 L2：人手拧的档位，AI 全部决策走规则引擎
+        #   4. 降级矩阵 L1：只砍发言——**发言是最贵的一次 LLM 调用**
+        #      （输出长、温度高、超时上界 45s 是投票的两倍多），而且它说什么
+        #      都不改变胜负。所以先砍它，比 L2 早一级。
+        reason = None
+        if force_fallback:
+            reason = "queue_depth"
+        elif not await switches.ai_use_llm(redis_conn):
+            reason = "switch"
+        elif await degrade.at_least(degrade.L2_AI_RULE_ENGINE, redis_conn):
+            reason = "level_l2"
+        elif (game.phase == GamePhase.SPEECH
+              and await degrade.at_least(degrade.L1_NO_AI_SPEECH, redis_conn)):
+            reason = "level_l1"
+
+        if reason:
+            # force_fallback 那一路已经在 ai_queue 里记过账了，别记两遍
+            if reason != "queue_depth":
+                metrics.ai_turns_degraded.labels(reason=reason).inc()
             return AIService._get_fallback_action(game, player)
 
         try:

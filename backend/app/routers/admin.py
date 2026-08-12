@@ -7,7 +7,7 @@
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from app.core import switches
+from app.core import degrade, switches
 from app.core.config import settings
 from app.core.redis import redis_client
 
@@ -21,6 +21,10 @@ def _guard(secret: str | None) -> None:
 
 class SwitchRequest(BaseModel):
     value: bool
+
+
+class LevelRequest(BaseModel):
+    level: int
 
 
 @router.get("/switches", include_in_schema=False)
@@ -51,3 +55,43 @@ async def reset_switch(name: str, x_internal_secret: str = Header(None)):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"未登记的开关: {name}")
     return {"name": name, "value": switches.default_of(name)}
+
+
+# ---- 降级矩阵（一个旋钮，见 core/degrade.py）----
+
+
+@router.get("/degrade", include_in_schema=False)
+async def get_degrade_level(x_internal_secret: str = Header(None)):
+    """当前档位 + 整张矩阵 + 每一级此刻是否生效。
+
+    **返回矩阵本身是刻意的**：没人在半夜记得住 3 档砍的是什么。
+    事故里第二分钟要能一眼确认"现在几档、这一档到底关了什么"，
+    而不是去翻代码或文档。
+    """
+    _guard(x_internal_secret)
+    return await degrade.snapshot(redis_client)
+
+
+@router.post("/degrade", include_in_schema=False)
+async def set_degrade_level(request: LevelRequest,
+                            x_internal_secret: str = Header(None)):
+    """拧到指定档位。一次写入，所有进程最迟 degrade.LOCAL_TTL 秒后生效。"""
+    _guard(x_internal_secret)
+    try:
+        await degrade.set_level(request.level, redis_client)
+    except ValueError as e:
+        # **越界报 400 不夹逼**：手滑输入 50 被夹成 5 就是静默把全站新开局拒了
+        raise HTTPException(status_code=400, detail=str(e))
+    return await degrade.snapshot(redis_client)
+
+
+@router.delete("/degrade", include_in_schema=False)
+async def reset_degrade_level(x_internal_secret: str = Header(None)):
+    """一键恢复到 0 档。
+
+    **恢复必须和降级一样一步到位**：要求逐级往下退，就是要求人在最累的时候
+    多做 5 次操作、每次都可能记错顺序。降级要能快，恢复更要能快。
+    """
+    _guard(x_internal_secret)
+    await degrade.reset(redis_client)
+    return await degrade.snapshot(redis_client)

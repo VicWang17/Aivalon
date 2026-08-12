@@ -798,9 +798,18 @@ class GameService:
         回放事件流不一样：它是**追加写**的，只增不改，天然适合缓存，
         而且它是唯一每次都真的回源 MySQL 的读路径。
         """
+        # 降级矩阵 L3：到档就把两级 TTL 都按倍数拉长（见 core/degrade.py）。
+        # **TTL 就是一致性上限**（同 cache.py 文件头），所以这一刀花掉的是"数据可以
+        # 多旧"，换来的是回源 MySQL 的次数按倍数下降。回放事件流是追加写、只增不改，
+        # 拉长 TTL 最多让刚发生的事件晚几秒出现在回放里——**这是全站最能承受
+        # "旧一点"的读路径**，所以 L3 挑它而不是挑对局状态。
+        l1_ttl = await degrade.cold_path_interval(cache.L1_TTL, redis_client)
+        l2_ttl = await degrade.cold_path_interval(cache.L2_TTL, redis_client)
         return await cache.get_or_load(
             cache.events_key(game_id),
             lambda: GameService._events_to_dicts(
                 GameService.get_game_events(game_id)),
             redis=redis_client,
+            l1_ttl=l1_ttl,
+            l2_ttl=int(l2_ttl),
         )

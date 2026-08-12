@@ -145,6 +145,24 @@ degrade_switch = Gauge(
     ["name"],
 )
 
+# 因降级档位而被拒的请求数。**和限流拒绝分开计数**：限流拒绝说明"有人打得太猛"，
+# 降级拒绝说明"是我们自己主动关掉的"——同一个 429/503 背后是两件完全不同的事，
+# 混在一个计数器里，事故里就分不清"流量涨了"和"我们把闸关了"。
+degrade_rejects = Counter(
+    "aivalon_degrade_rejects_total",
+    "Requests rejected by the degradation matrix",
+    ["reason"],
+)
+
+# 当前降级档位（0 = 正常，5 = 只服务进行中的房间，见 app/core/degrade.py）。
+# **刻意用一个 Gauge 而不是每级一个**：档位是累积的，看曲线的人要的是"什么时候
+# 拧到了几档"这一条线，拆成 5 条布尔曲线反而要自己拼出这个信息。
+# 顺带一条运维口径：这条线长时间不回 0 就是没人记得恢复——降级本该是临时措施。
+degrade_level = Gauge(
+    "aivalon_degrade_level",
+    "Current degradation level (0 = normal, 5 = reject new games)",
+)
+
 # ---- AI 链路 ----
 # 在飞的 AI 任务数（投递时登记、跑完注销，见 app/core/ai_queue.py）。
 # 各进程写的都是从 Redis 读回来的同一个数，所以多进程下不会互相打架。
@@ -154,13 +172,16 @@ ai_queue_depth = Gauge(
     "In-flight AI turns (dispatched but not yet finished)",
 )
 
-# 因队列积压而被降级（摘掉 LLM 走规则引擎）的 AI 回合数。
+# 被摘掉 LLM、改走规则引擎的 AI 回合数。
 # **自动降级尤其必须可观测**：人手切开关时至少有人知道自己切了，
 # 按深度自动触发的降级没人按过按钮——不上报的话，"AI 怎么突然开始说套话了"
 # 在复盘时根本无从查起（同 H-1 那条：降级动作不可观测就是静默变更）。
+# reason 四档，**分开的意义是它们要人做的事完全不同**：
+#   queue_depth = 自动触发（该看 worker 够不够）/ switch = 有人点名关了
+#   level_l1 / level_l2 = 有人拧了降级档位（该问的是"还没恢复吗"）
 ai_turns_degraded = Counter(
     "aivalon_ai_turns_degraded_total",
-    "AI turns forced to the rule engine by resource pressure",
+    "AI turns forced to the rule engine (by pressure, switch, or degrade level)",
     ["reason"],
 )
 

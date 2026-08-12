@@ -105,6 +105,19 @@ class Settings(BaseSettings):
     # **小了会把正在跑的任务当成漏账清掉，于是深度永远上不去、降级永不触发**。
     AI_QUEUE_LEASE: float = 120.0
 
+    # 5 级降级矩阵（见 app/core/degrade.py）。档位本身存 Redis 运行时可切，
+    # 这里只放各级生效后用到的参数。
+    # L3：冷路径降频的倍数。热榜归并与回放缓存都按这个倍数拉长间隔——
+    # **降频不是关掉**：榜单晚 15 秒更新没人投诉，查不到榜单会被当成故障。
+    DEGRADE_COLD_PATH_FACTOR: float = 3.0
+    # L4：建局排队。**这是个全局配额，不是按用户的**——按用户的那个
+    # （RATE_LIMIT_CREATE_GAME_*，10 局/小时）本来就在生效，而它保护不了系统容量：
+    # 一万个用户每人只建 1 局完全合规，机器照样倒（同 H-3a 网关层那条）。
+    # L4 要压的是"全站每秒能开出几局"，所以键是全局的一个。
+    # 刻意留一个正数而不是给 0——**给 0 就等于 L5 了，那这一级白设**。
+    DEGRADE_CREATE_GAME_TIMES: int = 20
+    DEGRADE_CREATE_GAME_SECONDS: float = 10.0
+
     # 集群（房间路由，见 app/core/node_registry.py）
     # 显式指定节点身份：重启后身份不变，名下房间会漂回来；留空则按 主机名-进程号-随机后缀 自动生成
     NODE_ID: str = ""

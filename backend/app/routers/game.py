@@ -8,6 +8,7 @@ from typing import List, Annotated
 from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Response
 from redis.asyncio import Redis
 from app.core import bloom
+from app.core import degrade
 from app.core import room_router
 from app.core.rate_limit import create_game_rate_limit, action_rate_limit, read_rate_limit
 from app.schemas.game import GameCreateRequest, GameCreateResponse, GameState, GameActionRequest, GameSummary, GameEventSchema, RecentGameSummary
@@ -56,6 +57,11 @@ async def create_game(
     创建新对局。
     需要提供 player_ids 列表。
     """
+    # 降级矩阵 L4/L5 的闸（见 core/degrade.py）。**只挡建局，不挡对局内的动作**——
+    # 这是"只服务进行中的房间"这句话的全部含义：已经开局的人还在玩，
+    # 停的只是新流量进来。挡错地方就是把正在打的对局一起掀了。
+    await degrade.guard_new_game(redis_client)
+
     # 1. 验证玩家 ID 是否存在
     if not request.player_ids:
         raise HTTPException(

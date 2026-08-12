@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 from datetime import datetime
 
 from app.core import cache
+from app.core import degrade
 from app.core import metrics
 from app.core import rank_buffer
 from app.core.redis import redis_client
@@ -208,7 +209,12 @@ class RankService:
                 raise
             except Exception as e:
                 logger.error("榜单归并失败，下轮重试: %s", e)
-            await asyncio.sleep(MERGE_INTERVAL)
+            # 降级矩阵 L3：到档就把间隔乘上倍数（见 core/degrade.py）。
+            # **每轮重新读、不在循环外读一次**：那样拧了档位要等到进程重启才生效,
+            # 而这个循环的生命周期和进程一样长——**一个要重启才生效的降级等于没有**（同 H-1）。
+            # 归并本身是"读 8 个分片 + 一次可能的查库",降频直接按倍数省掉这些。
+            interval = await degrade.cold_path_interval(MERGE_INTERVAL, redis_conn)
+            await asyncio.sleep(interval)
 
     @staticmethod
     async def get_recent_games(limit: int = 10) -> List[Dict[str, Any]]:
