@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi_limiter import FastAPILimiter
 from prometheus_fastapi_instrumentator import Instrumentator
 from app.core.redis import redis_pool
+from app.core import admission
 from app.core import bloom
 from app.core import cache
 from app.core import metrics  # noqa: F401  # 导入即注册自定义指标到 /metrics
@@ -28,6 +29,9 @@ async def lifespan(app: FastAPI):
     # 初始化限流器
     redis_client = redis.Redis(connection_pool=redis_pool)
     await FastAPILimiter.init(redis_client)
+    # 网关层准入的令牌桶脚本注册。没 bind 过的话 check() 直接放行——
+    # 刻意如此：单测和脚本里 import 到 app 但没起 lifespan 的场景不该被限流卡住
+    admission.bind(redis_client)
     # 启动 Write-Behind 批量刷库器（事件 Stream → MySQL）
     flusher_task = asyncio.create_task(flusher_loop())
     # 集群节点注册 + 心跳：维护房间路由的一致性哈希环。
@@ -86,6 +90,12 @@ app = FastAPI(
 
 # Prometheus 指标：自动采集各路由的 QPS 与延迟分位数，暴露在 /metrics
 Instrumentator().instrument(app).expose(app)
+
+# 网关层准入：全局令牌桶 + IP 令牌桶，被拒的请求不碰任何后端资源。
+# 注意这两行的顺序：Starlette 里**后加的中间件在外层**，所以 TraceId 在准入外面。
+# 刻意这么排——准入拒掉的 429 也要有 trace_id 和访问日志，否则"某个客户端什么时候
+# 被限了"在复盘时查不到，而这恰恰是限流最需要解释清楚的事。代价只是一次 uuid 生成。
+app.add_middleware(admission.AdmissionMiddleware)
 
 # trace_id 透传：生成/接续 X-Request-ID，注入日志上下文与响应头
 setup_logging()

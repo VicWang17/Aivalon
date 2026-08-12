@@ -55,6 +55,17 @@ class Settings(BaseSettings):
     RATE_LIMIT_ACTION_TIMES: int = 1
     RATE_LIMIT_ACTION_SECONDS: int = 1
 
+    # 网关层准入（令牌桶，见 app/core/admission.py）。和上面那组是两层不同的东西：
+    # 上面按 user_id 管业务规则（"这个用户别建太多局"），这里按容量管系统总量
+    # （"这台系统一共能吃多少"）——一万个用户每人只建一局完全合规，机器照样倒。
+    # capacity 和 rate 是两个独立旋钮：capacity = 允许多大的突发，rate = 稳态速率。
+    # 这两个值目前是拍的，等 S4 复测出真实拐点再回来定（AGENTS.md 铁律：先基线后优化）。
+    RATE_LIMIT_ADMISSION_ENABLED: bool = True
+    RATE_LIMIT_GLOBAL_CAPACITY: int = 400   # 全局突发上限
+    RATE_LIMIT_GLOBAL_RATE: float = 200.0   # 全局稳态 QPS
+    RATE_LIMIT_IP_CAPACITY: int = 60        # 单 IP 突发上限
+    RATE_LIMIT_IP_RATE: float = 20.0        # 单 IP 稳态 QPS
+
     # 集群（房间路由，见 app/core/node_registry.py）
     # 显式指定节点身份：重启后身份不变，名下房间会漂回来；留空则按 主机名-进程号-随机后缀 自动生成
     NODE_ID: str = ""

@@ -101,6 +101,17 @@ rank_reads = Counter(
     ["result"],
 )
 
+# ---- 准入控制 ----
+# 被网关层准入拒掉的请求数。layer 分 global / ip，两档刻意分开，
+# 因为看到它们之后要做的事完全不同：global 是**系统到顶了**（该扩容或降级），
+# ip 是**某个来源在打我**（该封禁或该排查）。合成一个 429 计数就分不出来了。
+# 这也是准入层唯一的验收口径：正常流量下它应该一直是 0，一涨就说明到了容量边界。
+admission_rejects = Counter(
+    "aivalon_admission_rejects_total",
+    "Requests rejected by gateway admission control",
+    ["layer"],
+)
+
 # ---- 降级开关 ----
 # 每个开关当前是否处于降级态（1 = 已降级）。name 是开关名，低基数。
 # 降级动作本身必须可观测：不上报的话，复盘时分不清"AI 没说话"是因为降级了

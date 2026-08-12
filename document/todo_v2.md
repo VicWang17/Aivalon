@@ -11,7 +11,7 @@
 
 **A / B / C / D / E / F / G 组已全部完成。只剩 H（韧性）,全部是"简历已写成事实但代码没有"的功能。**
 
-已完成：可观测体系、压测平台 + v1 基线、测试安全网（201 项全绿）、房间 Actor 单写者、Write-Behind、一致性哈希路由 + 心跳租约 + 故障转移、动作 P99 口径复测、WS 网关拆分 + 跨节点扇出 + 合并帧 + 分级推送 + 背压、L1/L2 两级缓存 + 事件驱动失效 + 布隆防穿透 + singleflight 防击穿 + 逻辑过期防雪崩、热榜批量合并 ZINCRBY 写路径 + 分片 ZSET 定时归并读路径。
+已完成：可观测体系、压测平台 + v1 基线、测试安全网（213 项全绿）、房间 Actor 单写者、Write-Behind、一致性哈希路由 + 心跳租约 + 故障转移、动作 P99 口径复测、WS 网关拆分 + 跨节点扇出 + 合并帧 + 分级推送 + 背压、L1/L2 两级缓存 + 事件驱动失效 + 布隆防穿透 + singleflight 防击穿 + 逻辑过期防雪崩、热榜批量合并 ZINCRBY 写路径 + 分片 ZSET 定时归并读路径。
 
 **排障记录索引**（细节在 `document/DEVLOG.md`）：
 - 006 WS 鉴权 yield 依赖独占连接 → 100 连接 93% 失败改到 1000 连接零失败
@@ -33,7 +33,7 @@ export AI_USE_LLM=false AI_TASK_RATE_LIMIT=100000/m RATE_LIMIT_ACTION_TIMES=100 
 uvicorn app.main:app --port 8000 &          # 确认 pgrep -f "uvicorn app.main" | wc -l == 1
 celery -A app.core.celery_app worker --loglevel=warning &
 python -m app.core.outbox_relay &
-./run_tests.sh                              # 应 201 项全绿
+./run_tests.sh                              # 应 213 项全绿
 ```
 多节点：`NODE_ID=node-2 NODE_ADDR=http://127.0.0.1:8002 uvicorn app.main:app --port 8002`,演练 `bench/drill_room_routing.py verify|takeover`。
 
@@ -89,7 +89,10 @@ python -m app.core.outbox_relay &
 
 - [x] **AI 降级开关运行时可切**（L1/L2 的前置）：`core/switches.py`,开关值存 Redis(`switch:ai_use_llm`),各进程读同一个 key、本地带 1s TTL 缓存,操作入口 `/internal/switches`（GET/POST/DELETE,`X-Internal-Secret` 鉴权,不进 OpenAPI）。原来 `AI_USE_LLM` 启动时读一次,要改就得重启所有 Celery worker,而 AI 决策就跑在 worker 里——**需要重启才能生效的降级开关在事故里等于没有**。两个 TTL 方向相反：**开关本身不设 TTL**（降级是人做的决定,不能自己弹回来,半夜降完睡觉 TTL 一到故障重来一遍),**本地缓存必须设 TTL**（开关每个 AI 回合读一次,不然就是把 Redis 挂在热路径上;TTL 即一致性上限)。**失败方向：Redis 读失败优先保持本进程上次读到的值,哪怕已过期**,只有从没读到过才退回配置默认值——切降级往往正因为线上在着火,而 Redis 抖动本身就是着火的一部分,退回默认值等于开关在最需要它的时刻自己失效;这和缓存"读不到就放行回源"恰好相反,**一个是"可以慢"另一个是"不能变"**。默认值仍取自 `settings.AI_USE_LLM`,压测那套环境变量照旧有效。开关状态上指标 `aivalon_degrade_switch{name}`（降级动作不可观测就是静默变更)。11 项单测（DEVLOG 033）
 - [x] **LLM 舱壁**：`asyncio.wait_for` 包住整次调用 + `max_retries=0`,超时/异常一律返回 `{"error": ...}` 回落规则引擎。原来把 `timeout` 直接传给 OpenAI SDK,看着像"最多等 45 秒"——实际 SDK 的 `timeout` 是**单次尝试**的、默认还重试 2 次、重试间有退避,真实上界 140 秒以上。**"我传了 timeout"和"这次调用有上界"是两回事**,上界要卡在自己代码里、不能外包给依赖库的参数（`wait_for` 在最外层,SDK 换版本这个上界还成立）。**有规则引擎兜底时重试的价值是负的**——它花掉的是玩家的等待时间,所以关掉 SDK 重试。**超时绝不上抛**：抛出去走 Celery 重试,而重试打的还是那个慢掉的 LLM,一次慢放大成五次慢。`asyncio.TimeoutError` 分支必须排在 `except Exception` 前面（3.11 起它就是内置 `TimeoutError`,而那是 `OSError` 子类,会被 `except Exception` 抓走;写反不报错、只是超时全记进 error 档,**指标静默失真**）。顺手接上了 `llm_calls_total` / `llm_latency`——它们声明在 `metrics.py` 但全代码库从没 `inc()` 过。指标口径两条：**失败和超时的耗时也要记**（只记成功的话 LLM 全超时时曲线反而变好看,最该告警的时刻一片绿),**四档分开**`success`/`timeout`（依赖慢了→降级扩容)/`invalid`（依赖坏了,通了但非 JSON→改 prompt)/`error`（鉴权配额网络)。超时值提到配置 `AI_LLM_TIMEOUT_SPEECH=45` / `AI_LLM_TIMEOUT_ACTION=20`,事故里可压小。11 项单测（DEVLOG 034）
-- [ ] 分层限流：网关层全局令牌桶 + IP 维度；应用层用户级滑动窗口补齐遗漏场景；资源层单房间事件风暴保护 + AI 队列深度上限
+- 分层限流（三层，分开做）：
+  - [x] **网关层准入：全局令牌桶 + IP 令牌桶**。`core/admission.py` + `AdmissionMiddleware`,挂最外层,被拒的请求不碰任何后端资源。和已有 `rate_limit.py`（按 user_id 的业务规则）是两层不同的东西——**一万个用户每人只建 1 局完全合规,机器照样倒**,按用户限流保护不了系统容量。不复用固定窗口的两个理由：窗口边界能挤进 **2 倍**流量;更关键是固定窗口只有"N 次/秒"一个旋钮,**表达不了"允许突发到 400、稳态只给 200/s"**,而这正是真实流量的形状。令牌桶把它拆成两个独立旋钮：`capacity`=突发上限,`rate`=稳态速率。**必须用 Lua**：「读桶→算补令牌→判断→写回」是读改写序列,多进程共享一个桶,`GET`+`SET` 会让两个进程同时读到"还剩 1 个"各自放行。**时间基准取 `redis.call('TIME')` 不取节点本地时钟**——节点间时钟偏差会直接变成令牌数偏差,快的那台等于给自己多发配额（**共享状态的时间基准也是共享状态**,同 C05）。**失败方向：Redis 读失败一律放行**,限流器是保护机制不是可用性依赖,抖一下就拒全站的话它自己成了新单点、造成的故障比防的还大——这和 H-1 开关"读不到保持降级态"**恰好相反**。三处"限流器自己变成放大器"的坑：`/health`+`/metrics` 必须豁免（拒了健康检查→LB 摘节点→剩下的更快被拒→**限流器亲手把过载放大成雪崩**）、429 必须带 `Retry-After`（不说等多久客户端就立刻重试,重试本身变成新峰值）、**被 IP 层拒掉的不能扣全局桶**（否则刷接口的 IP 顺带烧掉别人配额,而那正是它想干的）。**不读 `X-Forwarded-For`**（可伪造的限流键等于没有限流键）。中间件顺序刻意让 TraceId 包在外层,429 也要有 trace_id 和访问日志。桶 TTL 按 `cap/rate`（恰好攒满)设,无损——**过期消失的桶和满桶完全等价**,顺手解决 IP 桶随访客数无限增长。指标 `aivalon_admission_rejects_total{layer}`,global/ip 分开（**看到它们要做的事不同**：global=系统到顶该扩容,ip=某来源在打我该封）。阈值暂拍（全局 400/200,单 IP 60/20),等 S4 出真实拐点再定。12 项单测（DEVLOG 035）
+  - [ ] 应用层：用户级滑动窗口补齐遗漏场景（现有 `rate_limit.py` 只挂了建局和提交动作两个路由）
+  - [ ] 资源层：单房间事件风暴保护 + AI 队列深度上限
 - [ ] 5 级降级矩阵 + 一键触发开关中心：L1 关 AI 发言 / L2 AI 全切规则引擎 / L3 回放热榜降频 / L4 创建对局排队 / L5 拒新开局只服务进行中房间
 - [ ] 依赖熔断：熔断器包住 LLM / 统计 / 邮件,熔断自动挂对应降级级别
 - [ ] **S4 复测：10 倍突发下核心对局链路零中断**（唯一必测项,对照组是基线 S4 的 10.09% 失败率）
