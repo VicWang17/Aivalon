@@ -112,6 +112,16 @@ admission_rejects = Counter(
     ["layer"],
 )
 
+# 被应用层滑动窗口拒掉的请求数。scope 是接口标识（低基数，接口数量固定），
+# 绝不能放 user_id（C02 基数爆炸）。和上面 admission 分开记：admission 说明
+# **系统**到顶了，这个说明**某个用户**在某个接口上超了业务配额——
+# 前者要扩容或降级，后者是正常的规则生效，多数时候不需要任何动作。
+rate_limit_rejects = Counter(
+    "aivalon_rate_limit_rejects_total",
+    "Requests rejected by per-user sliding window",
+    ["scope"],
+)
+
 # ---- 降级开关 ----
 # 每个开关当前是否处于降级态（1 = 已降级）。name 是开关名，低基数。
 # 降级动作本身必须可观测：不上报的话，复盘时分不清"AI 没说话"是因为降级了

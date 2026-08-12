@@ -221,27 +221,33 @@ async def test_forward_omits_absent_optional_headers(monkeypatch, restore_regist
 
 
 @pytest.mark.asyncio
-async def test_rate_limiter_skips_forwarded_requests():
+async def test_rate_limiter_skips_forwarded_requests(monkeypatch):
     """限流只在入口节点算一次：转发后的请求再算一次会让用户配额凭空减半，
-    且计几次取决于房间落在哪个节点，行为不可预期。"""
-    from app.core.rate_limit import SkipForwardedRateLimiter
+    且计几次取决于房间落在哪个节点，行为不可预期。
 
-    limiter = SkipForwardedRateLimiter(times=1, seconds=1)
-    called = {"n": 0}
+    限流实现换成滑动窗口后（H-3b）这条性质不变，所以测试跟着挪到新机制上——
+    要保护的是"转发豁免"这个行为，不是某个具体的限流类。
+    """
+    from app.core import sliding_window
 
-    async def boom(*a, **kw):
-        called["n"] += 1
-        raise AssertionError("转发请求不应进入限流逻辑")
+    limiter = sliding_window.SlidingWindowLimiter("action", 1, 1)
+    seen = []
 
-    # 带转发标记：直接放行，不触碰父类逻辑（父类未初始化 FastAPILimiter，一碰就炸）
-    import app.core.rate_limit as rl
-    monkey = rl.RateLimiter.__call__
-    try:
-        rl.RateLimiter.__call__ = boom
-        assert await limiter(FakeRequest(headers={FORWARD_HEADER: "1"}), None) is None
-        assert called["n"] == 0
-        # 不带标记：必须走父类限流逻辑
-        with pytest.raises(AssertionError):
-            await limiter(FakeRequest(), None)
-    finally:
-        rl.RateLimiter.__call__ = monkey
+    async def spy(key, window, limit):
+        seen.append(key)
+        return limit, 0
+
+    monkeypatch.setattr(sliding_window, "check", spy)
+
+    def _req(headers=None):
+        r = FakeRequest(headers=headers)
+        r.client = None      # user_or_ip_identifier 会回退成 ip:unknown
+        return r
+
+    # 带转发标记：直接放行，压根不进计数
+    assert await limiter(_req({FORWARD_HEADER: "1"})) is None
+    assert seen == []
+
+    # 不带标记：必须真的计一次
+    assert await limiter(_req()) is None
+    assert seen == ["action:ip:unknown"]

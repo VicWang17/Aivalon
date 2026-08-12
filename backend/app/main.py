@@ -15,6 +15,7 @@ from app.core.event_flusher import flusher_loop
 from app.core import node_registry
 from app.core import rank_buffer
 from app.core import pool_probe
+from app.core import sliding_window
 from app.core import socket_manager
 from app.core.tracing import TraceIdMiddleware, setup_logging
 from app.db.base import engine
@@ -32,6 +33,8 @@ async def lifespan(app: FastAPI):
     # 网关层准入的令牌桶脚本注册。没 bind 过的话 check() 直接放行——
     # 刻意如此：单测和脚本里 import 到 app 但没起 lifespan 的场景不该被限流卡住
     admission.bind(redis_client)
+    # 应用层滑动窗口的脚本注册。同样没 bind 就放行
+    sliding_window.bind(redis_client)
     # 启动 Write-Behind 批量刷库器（事件 Stream → MySQL）
     flusher_task = asyncio.create_task(flusher_loop())
     # 集群节点注册 + 心跳：维护房间路由的一致性哈希环。

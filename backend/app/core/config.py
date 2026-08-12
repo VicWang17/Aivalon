@@ -50,10 +50,26 @@ class Settings(BaseSettings):
     RABBITMQ_PORT: int = 5672
 
     # Rate Limit（v2 改为按用户维度统计，见 app/core/rate_limit.py；压测时可用环境变量调高阈值）
+    # v2 后期换成滑动窗口（app/core/sliding_window.py）：原来的固定窗口在窗口边界
+    # 能挤进 2 倍——上小时最后一秒建 10 局、下小时第一秒再建 10 局，2 秒内建 20 局，
+    # 而每次都"没超过 10 局/小时"。业务承诺被算法实现细节打了个对折。
     RATE_LIMIT_CREATE_GAME_TIMES: int = 10
     RATE_LIMIT_CREATE_GAME_SECONDS: int = 3600
     RATE_LIMIT_ACTION_TIMES: int = 1
     RATE_LIMIT_ACTION_SECONDS: int = 1
+    # 读接口（榜单/回放/历史）：真人点不出这个频率，拦的是脚本抓取。
+    # 这几个接口有缓存，打进来不贵，所以给得比写接口宽——**限流阈值该由"这个操作多贵"
+    # 和"真人能多快"共同决定**，不是所有接口配一个数。
+    RATE_LIMIT_READ_TIMES: int = 60
+    RATE_LIMIT_READ_SECONDS: int = 60
+    # 注册：比登录更该限，它会往库里写一行，且是没有身份的请求（只能按 IP 算）
+    RATE_LIMIT_REGISTER_TIMES: int = 5
+    RATE_LIMIT_REGISTER_SECONDS: int = 3600
+    # 发验证码 / 登录。发码**每次都花真钱**（一封邮件），登录是撞库的主目标
+    RATE_LIMIT_SEND_CODE_TIMES: int = 3
+    RATE_LIMIT_SEND_CODE_SECONDS: int = 3600
+    RATE_LIMIT_LOGIN_TIMES: int = 10
+    RATE_LIMIT_LOGIN_SECONDS: int = 300
 
     # 网关层准入（令牌桶，见 app/core/admission.py）。和上面那组是两层不同的东西：
     # 上面按 user_id 管业务规则（"这个用户别建太多局"），这里按容量管系统总量

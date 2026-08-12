@@ -1,6 +1,5 @@
 # 这个文件是认证相关的 API 路由处理，包含用户注册和登录接口。
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
-from fastapi_limiter.depends import RateLimiter
 from sqlalchemy.orm import Session
 from pydantic import EmailStr, BaseModel
 from app.db.base import get_db
@@ -12,6 +11,7 @@ from app.schemas.base import ResponseModel
 from app.core.redis import get_redis
 from app.core.email import send_verification_email, generate_verification_code
 from app.core.deps import get_current_user
+from app.core.rate_limit import login_rate_limit, register_rate_limit, send_code_rate_limit
 from redis.asyncio import Redis
 
 router = APIRouter()
@@ -19,7 +19,8 @@ router = APIRouter()
 class EmailSchema(BaseModel):
     email: EmailStr
 
-@router.post("/send-code", response_model=ResponseModel, dependencies=[Depends(RateLimiter(times=1, seconds=60))])
+@router.post("/send-code", response_model=ResponseModel,
+             dependencies=[Depends(send_code_rate_limit())])
 async def send_code(
     email_data: EmailSchema,
     background_tasks: BackgroundTasks,
@@ -55,7 +56,8 @@ async def send_code(
         data=None
     )
 
-@router.post("/register", response_model=ResponseModel[UserResponse])
+@router.post("/register", response_model=ResponseModel[UserResponse],
+             dependencies=[Depends(register_rate_limit())])
 async def register(
     user_in: UserCreate, 
     db: Session = Depends(get_db),
@@ -108,7 +110,8 @@ async def register(
         data=db_user
     )
 
-@router.post("/login", response_model=ResponseModel[Token], dependencies=[Depends(RateLimiter(times=5, seconds=60))])
+@router.post("/login", response_model=ResponseModel[Token],
+             dependencies=[Depends(login_rate_limit())])
 def login(user_in: UserLogin, db: Session = Depends(get_db)):
     """
     用户登录接口（返回 JWT Token）

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, 
 from redis.asyncio import Redis
 from app.core import bloom
 from app.core import room_router
-from app.core.rate_limit import create_game_rate_limit, action_rate_limit
+from app.core.rate_limit import create_game_rate_limit, action_rate_limit, read_rate_limit
 from app.schemas.game import GameCreateRequest, GameCreateResponse, GameState, GameActionRequest, GameSummary, GameEventSchema, RecentGameSummary
 from app.services.game_service import GameService
 from app.services.rank_service import RankService
@@ -102,7 +102,8 @@ async def create_game(
         )
     )
 
-@router.get("/recent", response_model=ResponseModel[List[RecentGameSummary]])
+@router.get("/recent", response_model=ResponseModel[List[RecentGameSummary]],
+            dependencies=[Depends(read_rate_limit("recent"))])
 async def get_recent_games(
     limit: int = 10
 ):
@@ -179,7 +180,8 @@ async def process_ai_action(
     
     return {"status": "ok"}
 
-@router.get("/history", response_model=ResponseModel[List[GameSummary]])
+@router.get("/history", response_model=ResponseModel[List[GameSummary]],
+            dependencies=[Depends(read_rate_limit("history"))])
 async def get_my_game_history(
     skip: int = 0,
     limit: int = 20,
@@ -192,7 +194,8 @@ async def get_my_game_history(
     games = GameService.get_user_games(current_user.id, skip=skip, limit=limit)
     return ResponseModel(data=games)
 
-@router.get("/{game_id}/events", response_model=ResponseModel[List[GameEventSchema]])
+@router.get("/{game_id}/events", response_model=ResponseModel[List[GameEventSchema]],
+            dependencies=[Depends(read_rate_limit("events"))])
 async def get_game_events(
     game_id: str,
     current_user: User = Depends(get_current_user)
@@ -217,7 +220,8 @@ async def get_game_events(
     # 这里答 404 会让前端把"还没开始"误判成"房间不存在"
     return ResponseModel(data=events)
 
-@router.get("/{game_id}", response_model=ResponseModel[GameState])
+@router.get("/{game_id}", response_model=ResponseModel[GameState],
+            dependencies=[Depends(read_rate_limit("game_state"))])
 async def get_game_state(
     game_id: str,
     request: Request,
