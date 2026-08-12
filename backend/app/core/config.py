@@ -82,6 +82,16 @@ class Settings(BaseSettings):
     RATE_LIMIT_IP_CAPACITY: int = 60        # 单 IP 突发上限
     RATE_LIMIT_IP_RATE: float = 20.0        # 单 IP 稳态 QPS
 
+    # 资源层限流（单房间，见 app/core/room_actor.py）。这是第三层，管的既不是系统总量
+    # 也不是用户配额，而是**单个资源的持有队列**：同一房间的动作在一个 Actor 里串行，
+    # 八个人对着一局猛点，每个人都没超自己的配额，队列却能排到几千个。
+    # 队列长度按"一局最多几个人同时有动作"给余量（8 人局一轮最多 8 个待处理动作，
+    # 给到 64 是留了 8 轮的缓冲）；超过这个数说明不是正常对局节奏。
+    ROOM_QUEUE_MAX: int = 64
+    # 单个动作从入队到拿到结果的上界（秒）。**排队本身也得有上界**——
+    # 队列不满但每个动作都慢的时候，队尾的人一样在无限等。
+    ROOM_ACTION_TIMEOUT: float = 15.0
+
     # 集群（房间路由，见 app/core/node_registry.py）
     # 显式指定节点身份：重启后身份不变，名下房间会漂回来；留空则按 主机名-进程号-随机后缀 自动生成
     NODE_ID: str = ""

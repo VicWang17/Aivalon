@@ -122,6 +122,19 @@ rate_limit_rejects = Counter(
     ["scope"],
 )
 
+# 被资源层拦掉的房间动作数。reason 分 queue_full / timeout，两档的含义不同：
+# queue_full 是**这个房间被打爆了**（动作压根没入队，一定没生效，可以安全重试）；
+# timeout 是**处理跟不上**（动作可能已经在跑，服务端不能断言它没生效）。
+# 和前两层再分一次：admission = 系统到顶，rate_limit = 某用户超配额，
+# 这个 = **某个房间这一个资源被打爆**，而前两层都统计不到它——
+# 八个人对着一局猛点，每个人都没超自己的配额。
+# 刻意不放 game_id 进 label（房间数无上限，C02 基数爆炸）；要定位到具体房间看日志。
+room_overload = Counter(
+    "aivalon_room_overload_total",
+    "Room actions rejected by per-room resource limits",
+    ["reason"],
+)
+
 # ---- 降级开关 ----
 # 每个开关当前是否处于降级态（1 = 已降级）。name 是开关名，低基数。
 # 降级动作本身必须可观测：不上报的话，复盘时分不清"AI 没说话"是因为降级了

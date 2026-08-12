@@ -19,7 +19,7 @@ from sqlalchemy import func
 import json
 import copy
 from app.core.redis import redis_client
-from app.core.room_actor import actor_manager
+from app.core.room_actor import actor_manager, RoomActionTimeout, RoomOverloaded
 from app.core import bloom
 from app.core import cache
 from app.core import event_journal
@@ -341,7 +341,22 @@ class GameService:
             games[game_id] = restored
 
         actor = actor_manager.get_or_create(game_id, GameService._apply_action)
-        return await actor.submit(user_id, action_type, payload)
+        try:
+            return await actor.submit(user_id, action_type, payload)
+        except RoomOverloaded:
+            # 503 + Retry-After：**队列满意味着动作压根没入队**，所以一定没生效，
+            # 可以放心让客户端重试。不带 Retry-After 的话它会立刻重试，
+            # 而重试本身就是这个房间正在过载的原因（同准入层那条）。
+            raise HTTPException(
+                status_code=503,
+                detail="房间繁忙，请稍后重试",
+                headers={"Retry-After": "1"},
+            )
+        except RoomActionTimeout:
+            # 504 而不是 503：**这次动作可能已经在执行了**，服务端不能断言它没生效。
+            # 语义上的差别要如实反映出来——客户端拿到 504 应该先拉一次状态再决定重不重试，
+            # 而不是照着 503 那样直接重发。真要安全重试就带幂等键（x-idempotency-key）。
+            raise HTTPException(status_code=504, detail="动作处理超时，请刷新对局状态")
 
     @staticmethod
     async def _apply_action(game_id: str, user_id: int, action_type: ActionType, payload: dict) -> GameState:
