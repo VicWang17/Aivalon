@@ -7,11 +7,11 @@
 
 ---
 
-## 🔄 当前位置（2026-08-11 晚）
+## 🔄 当前位置（2026-08-12 下午）
 
-**A / B / C / D 组已全部完成。剩下 E → F → G → H 四组,全部是"简历已写成事实但代码没有"的功能。**
+**A / B / C / D / E / F 组已全部完成。剩下 G（热榜）→ H（韧性）两组,全部是"简历已写成事实但代码没有"的功能。**
 
-已完成：可观测体系、压测平台 + v1 基线、测试安全网（54 项全绿）、房间 Actor 单写者、Write-Behind、一致性哈希路由 + 心跳租约 + 故障转移、动作 P99 口径复测。
+已完成：可观测体系、压测平台 + v1 基线、测试安全网（149 项全绿）、房间 Actor 单写者、Write-Behind、一致性哈希路由 + 心跳租约 + 故障转移、动作 P99 口径复测、WS 网关拆分 + 跨节点扇出 + 合并帧 + 分级推送 + 背压、L1/L2 两级缓存 + 事件驱动失效 + 布隆防穿透 + singleflight 防击穿 + 逻辑过期防雪崩。
 
 **排障记录索引**（细节在 `document/DEVLOG.md`）：
 - 006 WS 鉴权 yield 依赖独占连接 → 100 连接 93% 失败改到 1000 连接零失败
@@ -33,7 +33,7 @@ export AI_USE_LLM=false AI_TASK_RATE_LIMIT=100000/m RATE_LIMIT_ACTION_TIMES=100 
 uvicorn app.main:app --port 8000 &          # 确认 pgrep -f "uvicorn app.main" | wc -l == 1
 celery -A app.core.celery_app worker --loglevel=warning &
 python -m app.core.outbox_relay &
-./run_tests.sh                              # 应 54 项全绿
+./run_tests.sh                              # 应 149 项全绿
 ```
 多节点：`NODE_ID=node-2 NODE_ADDR=http://127.0.0.1:8002 uvicorn app.main:app --port 8002`,演练 `bench/drill_room_routing.py verify|takeover`。
 
@@ -78,7 +78,7 @@ python -m app.core.outbox_relay &
 - [x] 事件驱动失效 + TTL 兜底：Pub/Sub 失效通道补上 L1 跨进程失效不了的洞（L2 共享删一次即可,L1 在各进程堆里得喊一声）。**失效点挂在 flusher 刷库成功之后**,不在动作发生时——事件走 Write-Behind,提前失效会让读回源到还没刷入的 MySQL、把旧结果重新缓存 300s。失效失败不上抛,L1 短 TTL 才是保证（DEVLOG 026）
 - [x] 穿透：布隆过滤器拦截不存在的 game_id：`core/bloom.py`，md5 双哈希（内置 `hash()` 受 `PYTHONHASHSEED` 影响，跨进程算出不同位 → 共享位图失效，同 C05）。**能当门卫全靠误判单向**：只会误判"存在"，绝不误判"不存在"。三条工程约定维持"无假阴性"：空位图放行 / key 不设 TTL / 启动时位图不存在则灌一遍库里已有 id——少一条就会把真实房间 404 掉。拦截点放在**跨节点转发之前**（省掉一次往返），刻意不拦 `load_game`（AI 任务与快照恢复走它）。Redis 故障一律放行，指标 `bloom_rejects`（DEVLOG 027）
 - [x] 击穿：singleflight 互斥回源：`cache.py` 的 `_load_once`，`_inflight` 存 `key → future`。**用 future 不用锁**：锁只保证不同时查，后来者拿到锁还会各自再查一次；future 直接把第一次的结果交给所有等待者，N 个并发 → 1 次查询。两个真坑：① `asyncio.shield` 挡取消传播——不加的话一个等待者被取消会连带打断回源方和其他等待者，**收敛故障的机制反而放大故障**；回源方被取消则必须放掉等待者，所以捕获 `BaseException` 而非 `Exception`（`CancelledError` 不是 `Exception` 子类）。② 占位前必须二次检查 L1——L2 读那次 `await` 期间别的任务足够跑完一次回源并回填。互斥按 key 不按全局。边界：**进程内互斥不是集群级**，M 个进程最坏 M 次回源；不上分布式锁是因为它要在每次未命中路径上多付一次往返，而把 N 压到 1 是数量级改善、把 M 压到 1 只是常数级。10 项单测，`gather` 50 并发断言只回源 1 次，不用压测（DEVLOG 029）
-- [ ] 雪崩：逻辑过期异步重建 + TTL 随机抖动
+- [x] 雪崩：逻辑过期异步重建 + TTL 抖动：L2 存的是信封 `{"v": 值, "exp": 逻辑过期时刻}`，物理 TTL = 逻辑过期 + 60s 宽限窗口 + ±10% 抖动。读到逻辑过期的值**先返回旧值、重建放后台**，调用方一次也不等（singleflight 把 N 次回源压成 1 次，但那 1 次还是有人在等）。抖动治的是**雪崩会自我强化**——第一轮集体到期后幸存的 key 全被对齐到同一时刻，下一轮更整齐。两个坑：① F-4 那个二次检查 L1 会让重建空转（旧值刚被填进 L1），所以重建走 `skip_l1` 但照旧查 `_inflight`；② `_decode` 返回三元组而非二元组——**None 是合法缓存值**，拿它当解析失败会把 F-3 的空结果缓存废掉。`KEY_PREFIX` 升 v2（值结构变了必须换前缀，这是 F-1 留它的用处）。13 项单测，核心那条判耗时不判返回值（DEVLOG 030）
 
 ## G. 热榜（简历⑥·下）
 

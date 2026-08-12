@@ -24,8 +24,9 @@
 import asyncio
 import json
 import logging
+import random
 import time
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Set, Tuple
 
 from app.core import metrics
 
@@ -37,7 +38,19 @@ L1_MAX = 512
 # L1 存活时间（秒）。见文件头：这个数字是"能容忍多久的脏读"，不是性能参数。
 L1_TTL = 3.0
 # L2 存活时间（秒）。够长才有意义，失效靠 F-2 的事件驱动，TTL 只是兜底。
+# 注意这个数字在 F-5 之后是**逻辑过期时间**，不是 Redis 的 TTL：
+# Redis 上真正的 TTL 是它加上 L2_GRACE，见下面。
 L2_TTL = 300
+
+# 逻辑过期之后、物理删除之前的宽限窗口（秒）。
+# 这段时间里 key 在 Redis 上还活着，只是被标记为"该刷新了"——所以读到它可以
+# **先把旧值给出去，再在后台重建**，回源过程中没有任何请求需要等待。
+# 没有这个窗口就没得可返：key 一到期就物理消失，读到的只能是未命中。
+L2_GRACE = 60
+
+# TTL 抖动比例。同一批写入的 key 如果 TTL 完全一样，会在同一秒集体到期
+# （雪崩），所以给每个 key 的物理 TTL 加 ±10% 的随机偏移把到期时刻摊开。
+L2_JITTER = 0.1
 
 
 class _L1:
@@ -96,11 +109,66 @@ l1 = _L1()
 # key 命名带版本号前缀：改了缓存值的结构（比如给事件多加一个字段）时，
 # 只要 bump 这个前缀，全部旧值自动作废。否则新代码会读到老结构的值，
 # 而这种问题在灰度发布期间表现为"一半请求缺字段"，很难定位。
-KEY_PREFIX = "aivalon:cache:v1"
+# v1 → v2：F-5 给 L2 的值套上了逻辑过期信封（见 _encode），结构变了必须换前缀。
+# 这就是当初留这个前缀的用处——不换的话新代码读到 v1 的裸值会当成信封解析。
+KEY_PREFIX = "aivalon:cache:v2"
 
 
 def events_key(game_id: str) -> str:
     return f"{KEY_PREFIX}:events:{game_id}"
+
+
+# ----------------------------------------------------------------------
+# 逻辑过期信封
+# ----------------------------------------------------------------------
+#
+# 存进 L2 的不是裸值，而是 {"v": 值, "exp": 逻辑过期时刻}。
+# Redis 上的物理 TTL 比 exp 多留一个 L2_GRACE 的宽限窗口，于是出现一段
+# "逻辑上已过期、物理上还在"的时间——读到它可以**先把旧值返回，再在后台重建**。
+#
+# 为什么需要它：靠物理 TTL 过期时，key 一到期就消失，读到的只能是未命中，
+# 于是必须**当场回源**——请求要等回源那几十毫秒。singleflight（F-4）能把
+# N 次回源压成 1 次，但那 1 次还是有人在等。逻辑过期把"等"也去掉了：
+# 谁都不等，第一个发现过期的人顺手派一个后台任务去刷。
+#
+# `exp` 用 `time.time()`（墙上时钟）而不是 `monotonic()`：这个值要被**其他进程**
+# 读出来比较，而 monotonic 的零点每个进程都不一样，跨进程比毫无意义。
+# 机器间的时钟偏移在这里只会让刷新时刻早晚偏几秒，无害——
+# 和 C06 那个心跳判活不同，那里时钟偏移会直接变成误判，所以必须用 Redis 的单一时钟。
+
+
+def _encode(value: Any, l2_ttl: int) -> str:
+    return json.dumps({"v": value, "exp": time.time() + l2_ttl}, default=str)
+
+
+def _decode(raw: str) -> Tuple[bool, bool, Any]:
+    """返回 (信封是否有效, 是否还新鲜, 值)。
+
+    第一个标志不能省、也不能用"值是不是 None"代替：**None 本身是合法的缓存值**
+    （空结果照样值得缓存，F-1 的 `(hit, value)` 元组就是为这个设计的）。
+    拿 None 当"解析失败"，会让缓存下来的空结果每次都被当成坏数据去回源。
+
+    解不出信封时按未命中处理：可能是换版本前的残留，也可能被别的东西写坏了。
+    刻意不抛异常——缓存里的脏数据不该让读接口失败，回源一次就自愈了。
+    """
+    try:
+        env = json.loads(raw)
+        return True, time.time() < env["exp"], env["v"]
+    except (json.JSONDecodeError, TypeError, KeyError):
+        logger.warning("L2 值不是合法信封，按未命中处理")
+        return False, False, None
+
+
+def _physical_ttl(l2_ttl: int) -> int:
+    """物理 TTL = 逻辑过期 + 宽限窗口，再加 ±L2_JITTER 的随机抖动。
+
+    抖动是防雪崩的另一半：同一批写入的 key（比如缓存刚被清空后重建的那批）
+    如果 TTL 完全一样，会在同一秒集体到期，**回源洪峰会周期性地重现**——
+    第一次雪崩之后，幸存的 key 全被对齐到同一个到期时刻，下一轮更整齐。
+    随机化把到期时刻摊开，让它自然散掉而不是越来越同步。
+    """
+    base = l2_ttl + L2_GRACE
+    return max(1, int(base * (1 + random.uniform(-L2_JITTER, L2_JITTER))))
 
 
 async def get_or_load(
@@ -114,6 +182,9 @@ async def get_or_load(
 
     loader 可以是同步函数或协程函数：回源大多是同步的 ORM 查询，
     强制要求 async 只会让调用方多包一层。
+
+    L2 命中且**逻辑上已过期**时，返回旧值并派一个后台任务去重建（F-5）：
+    调用方不用等回源，代价是这一次读到的值最旧不超过 L2_GRACE。
     """
     hit, value = l1.get(key)
     if hit:
@@ -129,12 +200,60 @@ async def get_or_load(
             logger.warning("L2 读失败，回源: key=%s %s", key, e)
             raw = None
         if raw is not None:
-            metrics.cache_reads.labels(level="l2", result="hit").inc()
-            value = json.loads(raw)
-            l1.set(key, value, ttl=l1_ttl)
-            return value
+            valid, fresh, value = _decode(raw)
+            if valid and fresh:
+                metrics.cache_reads.labels(level="l2", result="hit").inc()
+                l1.set(key, value, ttl=l1_ttl)
+                return value
+            if valid:
+                # 逻辑过期但物理还在：先把旧值给出去，重建放后台。
+                # L1 只按 l1_ttl 缓存这个旧值，所以就算重建失败也最多旧这么久。
+                metrics.cache_reads.labels(level="l2", result="stale").inc()
+                _spawn_rebuild(key, loader, redis=redis, l1_ttl=l1_ttl, l2_ttl=l2_ttl)
+                l1.set(key, value, ttl=l1_ttl)
+                return value
 
     return await _load_once(key, loader, redis=redis, l1_ttl=l1_ttl, l2_ttl=l2_ttl)
+
+
+# 正在后台重建的 key。没有它的话，逻辑过期窗口里每个请求都会派一个重建任务——
+# 本来要防的回源洪峰会原样出现在后台，只是不再挡着请求而已。
+_rebuilding: Set[str] = set()
+
+
+def _spawn_rebuild(
+    key: str,
+    loader: Callable[[], Any],
+    redis=None,
+    l1_ttl: float = L1_TTL,
+    l2_ttl: int = L2_TTL,
+) -> None:
+    """派一个后台任务重建这个 key。同一个 key 同时只会有一个在跑。"""
+    if key in _rebuilding:
+        return
+    _rebuilding.add(key)
+
+    async def _run():
+        try:
+            await _load_once(
+                key, loader, redis=redis, l1_ttl=l1_ttl, l2_ttl=l2_ttl, skip_l1=True
+            )
+        except Exception as e:
+            # 重建失败不影响任何人：旧值还在 Redis 上，下一个读的人会再派一次。
+            # 这是逻辑过期相比"当场回源"额外白拿的一层韧性——
+            # 数据源短暂不可用时，读接口靠旧值继续服务而不是一起失败。
+            logger.warning("后台重建失败，继续供旧值: key=%s %s", key, e)
+        finally:
+            _rebuilding.discard(key)
+
+    task = asyncio.create_task(_run())
+    # 存一个强引用再在完成时丢掉：asyncio 只持弱引用，不留着的话
+    # 任务可能在跑完之前被 GC 掉（官方文档明确警告过这点）
+    _rebuild_tasks.add(task)
+    task.add_done_callback(_rebuild_tasks.discard)
+
+
+_rebuild_tasks: Set[asyncio.Task] = set()
 
 
 # ----------------------------------------------------------------------
@@ -171,16 +290,24 @@ async def _load_once(
     redis=None,
     l1_ttl: float = L1_TTL,
     l2_ttl: int = L2_TTL,
+    skip_l1: bool = False,
 ) -> Any:
-    """回源并回填两级缓存。同一个 key 并发进来时只有第一个真的回源。"""
+    """回源并回填两级缓存。同一个 key 并发进来时只有第一个真的回源。
+
+    `skip_l1=True` 给后台重建用：重建的目的就是刷掉旧值，而旧值此刻正躺在 L1 里
+    （逻辑过期那条路径会把它填进去好让后续读命中），查 L1 会直接拿到它然后什么都不做。
+    """
     # 二次检查 L1。调用方查 L1 未命中之后还 await 过一次 L2 读，那期间足够别的任务
     # 完整跑完一次回源并回填——尤其 loader 是同步函数时，它从头到尾不让出事件循环，
     # 等这个任务被调度回来时"正在回源"的痕迹已经没了，不重查 L1 就会白查一次库。
-    hit, value = l1.get(key)
-    if hit:
-        metrics.cache_reads.labels(level="l1", result="hit").inc()
-        return value
+    if not skip_l1:
+        hit, value = l1.get(key)
+        if hit:
+            metrics.cache_reads.labels(level="l1", result="hit").inc()
+            return value
 
+    # `_inflight` 照旧要查，重建也不例外：已经有人在回源就直接用它的结果，
+    # 那份结果一定是新的。跳过的只是 L1，不是 singleflight。
     existing = _inflight.get(key)
     if existing is not None:
         metrics.cache_reads.labels(level="singleflight", result="coalesced").inc()
@@ -217,7 +344,8 @@ async def _load_once(
     # 也只有回源者写缓存——等待者跟着写就是 N-1 次重复写。
     if redis is not None:
         try:
-            await redis.set(key, json.dumps(value, default=str), ex=l2_ttl)
+            # 写的是逻辑过期信封，物理 TTL 比逻辑过期多留一个宽限窗口 + 随机抖动
+            await redis.set(key, _encode(value, l2_ttl), ex=_physical_ttl(l2_ttl))
         except Exception as e:
             logger.warning("L2 回填失败: key=%s %s", key, e)
     l1.set(key, value, ttl=l1_ttl)
