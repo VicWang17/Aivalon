@@ -46,6 +46,17 @@ class Camp(str, Enum):
     GOOD = "good"  # 好人（蓝方）
     EVIL = "evil"  # 坏人（红方）
 
+# 红方角色集合。判阵营一律比枚举，不比字符串——
+# `Character.ASSASSIN.value` 是小写的 "assassin"，拿一份大写名字的集合去 `in`
+# 永远是 False，而且**不报错**：胜负照样算得出来，只是全算错。
+EVIL_CHARACTERS = frozenset({Character.ASSASSIN, Character.MORGANA, Character.MINION})
+
+
+def camp_of(character) -> Camp:
+    """角色所属阵营。character 可以是 Character 或它的字符串值。"""
+    return Camp.EVIL if Character(character) in EVIL_CHARACTERS else Camp.GOOD
+
+
 class MissionResult(str, Enum):
     """
     任务结果枚举

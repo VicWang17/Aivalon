@@ -12,6 +12,7 @@ from app.core import cache
 from app.core import metrics  # noqa: F401  # 导入即注册自定义指标到 /metrics
 from app.core.event_flusher import flusher_loop
 from app.core import node_registry
+from app.core import rank_buffer
 from app.core import pool_probe
 from app.core import socket_manager
 from app.core.tracing import TraceIdMiddleware, setup_logging
@@ -42,6 +43,13 @@ async def lifespan(app: FastAPI):
     # 缓存失效广播：L2 是共享的删一次就够，L1 在各进程自己堆里，得喊一声让大家清
     cache.bind(redis_client)
     cache.start()
+    # 热榜批量刷榜循环：对局结束只把增量攒进缓冲，这里周期性合并成一批 ZINCRBY 打出去。
+    # 放在 API 进程而不是 Celery worker 里：它是个常驻的定时循环，
+    # 而 Celery 那边是任务驱动的，没有"每秒跑一次"这个语义（beat 最小粒度也不合适）。
+    # 传 node_id 是为了让换出用的临时 key 按节点分开，见 rank_buffer.drain_once。
+    rank_task = asyncio.create_task(
+        rank_buffer.drain_loop(redis_client, cluster.node_id)
+    )
     # 布隆过滤器预热：位图不存在时才灌一遍库里已有的对局 id。
     # 这不是性能优化——过滤器上线前建的房间没登记过，位图一旦非空就会把它们判成
     # "不存在"，直接 404 掉真实房间（见 app/core/bloom.py 的 warm）。
@@ -53,6 +61,7 @@ async def lifespan(app: FastAPI):
     probe_task = pool_probe.start(engine, label="main")
     yield
     flusher_task.cancel()
+    rank_task.cancel()
     if probe_task:
         probe_task.cancel()
     await socket_manager.manager.stop()

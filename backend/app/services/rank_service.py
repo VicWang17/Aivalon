@@ -1,91 +1,50 @@
 # 这个文件是排行榜和最近对局缓存服务，负责管理 Redis 中的热点数据。
+#
+# 榜单的**写**路径不在这里，在 `core/rank_buffer.py`：对局结束只把增量攒进合并缓冲，
+# 由后台循环批量 ZINCRBY 刷榜。这里只留读路径和从 MySQL 全量重建的兜底。
 import json
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 from app.core.redis import redis_client
+from app.core import rank_buffer
 from app.models.user import User
 from app.models.game import Game
-from app.schemas.game import GameState, GamePhase
 from app.db.base import SessionLocal
 import asyncio
 
-# Redis Keys
-KEY_LEADERBOARD_TOTAL = "leaderboard:total_wins"
-KEY_LEADERBOARD_GOOD = "leaderboard:wins_good"
-KEY_LEADERBOARD_EVIL = "leaderboard:wins_evil"
+# Redis Keys。榜单的 key 定义在 rank_buffer 里（写路径要用），这里引用同一份，
+# 不各写一遍——两处字面量早晚会写歪，而写歪的表现是"榜看起来是空的"。
+KEY_LEADERBOARD_TOTAL = rank_buffer.BOARD_KEYS[rank_buffer.BOARD_TOTAL]
+KEY_LEADERBOARD_GOOD = rank_buffer.BOARD_KEYS[rank_buffer.BOARD_GOOD]
+KEY_LEADERBOARD_EVIL = rank_buffer.BOARD_KEYS[rank_buffer.BOARD_EVIL]
 KEY_RECENT_GAMES = "global:recent_games"
 MAX_RECENT_GAMES = 50
 
 class RankService:
     @staticmethod
-    async def update_after_game_finish(game_state: GameState, winner: str, redis_conn=None):
-        """
-        游戏结束时调用：更新排行榜和最近对局缓存
-        """
-        # 1. 更新最近对局列表
-        await RankService._add_recent_game(game_state, winner, redis_conn)
-        
-        # 2. 更新排行榜 (全量更新或增量更新)
-        # 鉴于 User 表已经更新了 total_wins，我们可以直接查询最新的 User 数据来更新 ZSET
-        await RankService._update_leaderboard_for_users(game_state, redis_conn)
+    async def record_finished_game(game_id: str, winner: str, player_count: int,
+                                   redis_conn=None):
+        """把一局的摘要推进最近对局列表。
 
-    @staticmethod
-    async def _add_recent_game(game: GameState, winner: str, redis_conn=None):
-        """
-        将游戏摘要推入 Redis List
+        只要摘要那几个字段，不要整个 GameState：原来为了调这一步得把 players 反序列化成
+        `PlayerState` 再拼一个字段全填默认值的 `GameState`，而用到的只有 game_id、
+        winner 和人数三个值。
         """
         client = redis_conn or redis_client
-        
-        # 构建摘要
+
         summary = {
-            "id": game.game_id,
-            "winner": winner, # "good" or "evil"
-            "created_at": datetime.now().isoformat(), # 使用当前时间作为完成时间
-            "player_count": len(game.players),
+            "id": game_id,
+            "winner": winner,               # "good" or "evil"
+            "created_at": datetime.now().isoformat(),
+            "player_count": player_count,
         }
-        
-        # 序列化
-        data = json.dumps(summary)
-        
-        # LPUSH + LTRIM
+
+        # LPUSH + LTRIM：列表定长，不会无界增长
         async with client.pipeline() as pipe:
-            pipe.lpush(KEY_RECENT_GAMES, data)
+            pipe.lpush(KEY_RECENT_GAMES, json.dumps(summary))
             pipe.ltrim(KEY_RECENT_GAMES, 0, MAX_RECENT_GAMES - 1)
-            await pipe.execute()
-
-    @staticmethod
-    async def _update_leaderboard_for_users(game: GameState, redis_conn=None):
-        """
-        更新参与本局玩家的排行榜分数
-        """
-        client = redis_conn or redis_client
-        
-        user_ids = [p.user_id for p in game.players if not p.is_ai]
-        if not user_ids:
-            return
-
-        # 在线程池中执行 DB 查询，避免阻塞事件循环
-        def query_users():
-            db = SessionLocal()
-            try:
-                return db.query(User).filter(User.id.in_(user_ids)).all()
-            finally:
-                db.close()
-
-        users = await asyncio.to_thread(query_users)
-        
-        if not users:
-            return
-
-        async with client.pipeline() as pipe:
-            for user in users:
-                # 更新总胜场
-                pipe.zadd(KEY_LEADERBOARD_TOTAL, {str(user.id): user.total_wins})
-                # 更新阵营胜场
-                pipe.zadd(KEY_LEADERBOARD_GOOD, {str(user.id): user.wins_good})
-                pipe.zadd(KEY_LEADERBOARD_EVIL, {str(user.id): user.wins_evil})
             await pipe.execute()
 
     @staticmethod

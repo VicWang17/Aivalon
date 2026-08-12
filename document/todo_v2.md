@@ -9,9 +9,9 @@
 
 ## 🔄 当前位置（2026-08-12 下午）
 
-**A / B / C / D / E / F 组已全部完成。剩下 G（热榜）→ H（韧性）两组,全部是"简历已写成事实但代码没有"的功能。**
+**A / B / C / D / E / F 组已全部完成，G 组写路径已完成。剩下 G 读路径 → H（韧性）,全部是"简历已写成事实但代码没有"的功能。**
 
-已完成：可观测体系、压测平台 + v1 基线、测试安全网（149 项全绿）、房间 Actor 单写者、Write-Behind、一致性哈希路由 + 心跳租约 + 故障转移、动作 P99 口径复测、WS 网关拆分 + 跨节点扇出 + 合并帧 + 分级推送 + 背压、L1/L2 两级缓存 + 事件驱动失效 + 布隆防穿透 + singleflight 防击穿 + 逻辑过期防雪崩。
+已完成：可观测体系、压测平台 + v1 基线、测试安全网（162 项全绿）、房间 Actor 单写者、Write-Behind、一致性哈希路由 + 心跳租约 + 故障转移、动作 P99 口径复测、WS 网关拆分 + 跨节点扇出 + 合并帧 + 分级推送 + 背压、L1/L2 两级缓存 + 事件驱动失效 + 布隆防穿透 + singleflight 防击穿 + 逻辑过期防雪崩、热榜批量合并 ZINCRBY 写路径。
 
 **排障记录索引**（细节在 `document/DEVLOG.md`）：
 - 006 WS 鉴权 yield 依赖独占连接 → 100 连接 93% 失败改到 1000 连接零失败
@@ -33,7 +33,7 @@ export AI_USE_LLM=false AI_TASK_RATE_LIMIT=100000/m RATE_LIMIT_ACTION_TIMES=100 
 uvicorn app.main:app --port 8000 &          # 确认 pgrep -f "uvicorn app.main" | wc -l == 1
 celery -A app.core.celery_app worker --loglevel=warning &
 python -m app.core.outbox_relay &
-./run_tests.sh                              # 应 149 项全绿
+./run_tests.sh                              # 应 162 项全绿
 ```
 多节点：`NODE_ID=node-2 NODE_ADDR=http://127.0.0.1:8002 uvicorn app.main:app --port 8002`,演练 `bench/drill_room_routing.py verify|takeover`。
 
@@ -47,7 +47,7 @@ python -m app.core.outbox_relay &
 |---|---|---|
 | ③ | 创建对局耗时…降至 **226ms** | ⚠️ 226ms 是 max,无统计稳定性（复测两轮 187ms / 411ms）。**建议改成"降至亚秒级"**——不需要重测,只需改措辞（DEVLOG 019 / C07） |
 | ⑤ | 独立 WS 网关分离连接与逻辑,Redis 路由表跨节点扇出；同 Tick 事件合并帧、分级推送、慢消费者背压 | E 组全部未做。⚠️ 2,000 连接与 180ms 是**这些优化之前**测出来的,别把因果挂上去 |
-| ⑥ | L1+L2 多级缓存、事件驱动失效、布隆/singleflight/逻辑过期、热榜分片 ZSET + 定时归并 + 本地缓存、MQ 批量 ZINCRBY | F / G 组全部未做 |
+| ⑥ | 热榜**分片 ZSET + 定时归并 Top N + 本地缓存** | 只剩 G 组读路径。缓存那半段（L1+L2 / 事件驱动失效 / 布隆 / singleflight / 逻辑过期）与 MQ 批量 ZINCRBY 已结清 |
 | ⑦ | 分层限流 + 5 级降级矩阵 + 依赖熔断,**10 倍突发流量下核心对局链路零中断** | H 组全部未做。⚠️ **"零中断"与已归档基线直接矛盾**：`v1_baseline.md` S4 记录 10 倍突发失败率 10.09%、P90 恶化到 7.8s。基线报告在 GitHub 上,面试官翻得到——这是唯一必须实测的一个数,做完 H 组跑一次 S4,拿不到就改简历 |
 
 已结清的数字（出处在 DEVLOG / `bench/results/`,不再复测）：2,000 长连接、广播 P99 180ms、动作 P99 83.8ms、4~5 事件合并一次提交、写事务数 -80%、RPO 200ms、一致性哈希 + 160 虚拟节点、迁移量 3/4 → 1/N、节点宕机 5.6s 接管、状态无回退、100 → 2,000 连接。
@@ -82,7 +82,7 @@ python -m app.core.outbox_relay &
 
 ## G. 热榜（简历⑥·下）
 
-- [ ] 写路径：对局结束 → MQ → 批量合并 ZINCRBY（合并同玩家窗口内多次变更）
+- [x] 写路径：对局结束 → MQ（已有 Celery `stats_queue`）→ 批量合并 ZINCRBY：`core/rank_buffer.py`，增量先 `HINCRBY` 攒进 HASH（field = `榜|玩家`），后台循环每秒 `RENAME` 换出 + pipeline 批量 `ZINCRBY`。**`ZADD` → `ZINCRBY` 省掉的不是一条命令而是那次查库**：`ZADD` 写绝对值就必须先知道现在是多少（那次 MySQL 查询的来源），`ZINCRBY` 写增量而增量在对局结束那刻已经知道。代价是不幂等，接受 at-least-once——榜是可以从 MySQL 全量重建的派生数据。收益分两笔别混着吹：**批量化是主要收益**（N 次往返变 1 次），同 member 合并在本项目里不大（一个人没法同时结束两局），比值看 `rank_updates_buffered / rank_updates_applied`。三个坑：① 换出必须 `RENAME` 不能"`HGETALL` 后 `DEL`"，后者会把两步之间进来的写连带抹掉且无从发现；② `RENAME` 的原子性顺带做掉多节点互斥，不用再套分布式锁；③ 删除放在 `ZINCRBY` 之后（宕机则重放一次，可自愈），反过来是永久少算。顺手修了既有 bug：`stats.py` 拿大写名字的集合比小写枚举值，`is_evil` 永远 False——坏人赢了不加分、好人赢了全场都加分，**不报错只是全算错**；判据收敛到 `game_enums.camp_of()`。13 项单测（DEVLOG 031）
 - [ ] 读路径：分片 ZSET + 定时归并 Top N + L1 本地缓存
 
 ## H. 韧性（简历⑦）

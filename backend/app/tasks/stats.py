@@ -1,16 +1,13 @@
 from app.core.celery_app import celery_app
-from app.schemas.game import GameState, PlayerState
-from app.models.game_enums import Camp, Character, GamePhase
+from app.models.game_enums import Camp, camp_of
 from app.models.user import User
 from app.services.rank_service import RankService
+from app.core import rank_buffer
 from app.db.base import SessionLocal
 from app.core.config import settings
 import redis.asyncio as redis
 from typing import List, Optional
 import asyncio
-
-# 坏人角色集合
-EVIL_CHARACTERS = {"ASSASSIN", "MORGANA", "MINION"}
 
 from app.core.idempotency import CeleryIdempotencyManager
 
@@ -43,85 +40,50 @@ def process_game_result(self, game_id: str, winner: str, players_data: List[dict
             # 转换 winner
             winner_camp = Camp(winner)
 
+            # 榜单增量：(榜名, user_id, 增量)。在这里就能算出来，不用查库——
+            # 这正是能改用 ZINCRBY 的前提，见 core/rank_buffer.py 的文件头。
+            deltas = []
+
             for p_data in players_data:
                 # 只有真实玩家才计入 UserStats
                 if p_data.get("is_ai", True):
                     continue
-                    
+
                 user = user_map.get(p_data["user_id"])
                 if not user:
                     continue
-                
+
                 # 更新总场次
                 user.total_games = (user.total_games or 0) + 1
-                
-                # 判定阵营
-                # p_data["character"] 是字符串
-                char_str = p_data["character"]
-                is_evil = char_str in EVIL_CHARACTERS
-                
-                # 判定胜负
-                is_winner = False
-                if winner_camp == Camp.GOOD and not is_evil:
-                    is_winner = True
-                elif winner_camp == Camp.EVIL and is_evil:
-                    is_winner = True
-                    
-                if is_winner:
+
+                # 判定阵营：比枚举不比字符串（`camp_of` 里说了原因）
+                camp = camp_of(p_data["character"])
+                is_evil = camp == Camp.EVIL
+
+                if camp == winner_camp:
                     user.total_wins = (user.total_wins or 0) + 1
                     if is_evil:
                         user.wins_evil = (user.wins_evil or 0) + 1
                     else:
                         user.wins_good = (user.wins_good or 0) + 1
-                
+                    deltas.append((rank_buffer.BOARD_TOTAL, user.id, 1))
+                    deltas.append((
+                        rank_buffer.BOARD_EVIL if is_evil else rank_buffer.BOARD_GOOD,
+                        user.id, 1,
+                    ))
+
                 db.add(user)
-            
+
             db.commit()
             print(f"[Stats Task] Updated user stats for game {game_id}")
             
-            # 2. 更新排行榜 & 最近对局 (调用 RankService)
-            # 还原 PlayerState 对象列表
-            restored_players = []
-            for p in players_data:
-                # 构造 PlayerState
-                # 注意：p["character"] 是字符串，需要转成枚举
-                player = PlayerState(
-                    user_id=p["user_id"],
-                    username=p["username"],
-                    seat_id=p["seat_id"],
-                    is_ai=p.get("is_ai", False),
-                    character=Character(p["character"]),
-                    is_connected=p.get("is_connected", True),
-                    has_voted=p.get("has_voted", False),
-                    has_acted=p.get("has_acted", False)
-                )
-                restored_players.append(player)
-                
-            # 构造最小化 GameState
-            fake_game_state = GameState(
-                game_id=game_id,
-                phase=GamePhase.FINISHED,
-                phase_start_time=0.0,
-                players=restored_players,
-                leader_id=0,
-                speaker_id=0,
-                winner=winner_camp,
-                # 其他必填字段给默认值
-                round=1,
-                vote_track=0,
-                mission_results=[],
-                vote_history=[],
-                mission_history=[],
-                speech_history=[],
-                proposed_team=[],
-                pending_mission_results=[],
-                votes={}
-            )
-            
-            # 在同步环境中运行异步代码
+            # 2. 榜单增量入合并缓冲 + 最近对局列表。
+            # 榜不再在这里直接写 ZSET：增量攒进缓冲，由 API 进程的后台循环批量刷
+            # （见 core/rank_buffer.py）。原来那句"查库拿绝对胜场再 ZADD 覆盖"整段没了——
+            # 增量上面已经算出来了，不需要再读一次数据源。
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
+
             async def run_stats():
                 redis_conn = redis.Redis(
                     host=settings.REDIS_HOST,
@@ -131,14 +93,20 @@ def process_game_result(self, game_id: str, winner: str, players_data: List[dict
                     encoding="utf-8"
                 )
                 try:
-                    await RankService.update_after_game_finish(fake_game_state, winner, redis_conn)
+                    await rank_buffer.record(deltas, redis_conn)
+                    await RankService.record_finished_game(
+                        game_id=game_id,
+                        winner=winner,
+                        player_count=len(players_data),
+                        redis_conn=redis_conn,
+                    )
                 finally:
                     await redis_conn.close()
 
             loop.run_until_complete(run_stats())
             loop.close()
-            
-            print(f"[Stats Task] Updated rank and recent games for {game_id}")
+
+            print(f"[Stats Task] Buffered {len(deltas)} rank updates for {game_id}")
 
         except Exception as e:
             print(f"[Stats Task] Error processing game {game_id}: {e}")

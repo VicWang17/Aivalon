@@ -75,6 +75,22 @@ bloom_rejects = Counter(
     "Requests rejected by bloom filter (nonexistent ids, never reached DB)",
 )
 
+# ---- 热榜 ----
+# 入缓冲的变更条数 / 真正打到 ZSET 上的 ZINCRBY 条数。
+# 两者相比即合并率，是"批量合并写"唯一的验收口径：buffered 远大于 applied
+# 才说明合并真的在发生。注意这个比值在本项目里不会很夸张——
+# 一个人没法同时结束两局，所以同 member 合并有限，主要收益在**批量化**
+# （一个窗口的变更攒成一次 pipeline，N 次往返变 1 次）。
+rank_updates_buffered = Counter(
+    "aivalon_rank_updates_buffered_total",
+    "Leaderboard score changes written into the merge buffer",
+)
+
+rank_updates_applied = Counter(
+    "aivalon_rank_updates_applied_total",
+    "ZINCRBY commands actually issued after merging",
+)
+
 # ---- AI 链路 ----
 # AI 队列积压深度（周期性从 broker 读取）
 ai_queue_depth = Gauge(
