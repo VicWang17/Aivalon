@@ -34,8 +34,16 @@ cd backend && source venv/bin/activate
 export AI_USE_LLM=false                    # AI 走规则引擎，避免 LLM 延迟/成本污染数据
 export RATE_LIMIT_ACTION_TIMES=100         # 调高按用户限流阈值（默认 1次/秒 是真人手速语义）
 export RATE_LIMIT_CREATE_GAME_TIMES=10000  # 同上（默认 10局/小时）
+export RATE_LIMIT_READ_TIMES=10000         # 轮询快照吃的是这个（默认 60次/分，0.3s 一次轮询 3 分钟就撞上）
 uvicorn app.main:app --port 8000 &
-celery -A app.core.celery_app worker --loglevel=warning &
+
+# **AI_TASK_RATE_LIMIT 要给 worker，不是给 uvicorn**：它是 Celery 任务级速率
+# （config.py 默认 "60/m"），是对局链路上最窄的一环——不放开的话每分钟只跑得动
+# 60 个 AI 回合，一局要 7 个，压测会卡在 speech 上等到超时。调 uvicorn 的环境变量
+# 对它一点用都没有，因为 AI 决策跑在 worker 进程里。
+# 症状识别：celery 日志里每分钟 AI 回合数是个稳定的整数——**规整到可疑的数字
+# 就是限流器的签名，真实负载不会这么整齐**。
+AI_TASK_RATE_LIMIT=100000/m celery -A app.core.celery_app worker --loglevel=warning &
 python -m app.core.outbox_relay &
 
 # 1. 运行 S2（10 个并发房间，持续 120s）

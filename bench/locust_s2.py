@@ -11,6 +11,7 @@
 import json
 import math
 import random
+import time
 import uuid
 from pathlib import Path
 
@@ -88,6 +89,30 @@ def _dump_samples(environment, **kwargs):
     print(f"\n=== 精确分位数（原始值，最近秩法，单位 ms）===\n{_report(rows)}")
     print(f"原始样本已存 {out}")
 
+# ---------------------------------------------------------------------------
+# 被拒之后做什么：照 `Retry-After` 退避，且**不把这一局丢掉**
+#
+# 原来 `_step` 里快照非 200 就 `self.game_id = None`，等于**把 429 理解成"这局没了"**：
+# 下一个 tick 去建新局，建局也被拒、`game_id` 仍是 None，再下一个 tick 又建一次。
+# S4 run B 里 500 个用户 120 秒发出 28,729 次建局尝试，真正的对局动作只跑了 221 次
+# ——**驱动器自己把限流放大成了流量**（DEVLOG 044）。
+#
+# 这正是 H-3a「429 必须带 Retry-After」那条规则反过来长在客户端身上：服务端两条
+# 429 路径都给了这个头（准入中间件的 JSONResponse、`sliding_window.py:147` 的
+# HTTPException），**这次是客户端没听**。
+#
+# 两个决定：
+# 1. **"这次没成功"和"这局结束了"必须分开判**。同一个状态位承载两种含义，压力下
+#    必然选错那种。现在只有三种情况才清掉 `game_id`：phase 到 `finished`（正常结算）、
+#    404（这局真没了）、以及建局本身失败（压根没有局）。429 和 5xx 都只是**这次没成功**,
+#    局还在，下个 tick 接着轮询。
+# 2. **退避必须有上界**。`Retry-After` 可能来自建局配额（10 局/小时 → 可能报出几千秒),
+#    照着睡就等于这个用户在本轮压测里彻底消失、还消失得无声无息。封顶之后超过上界的
+#    等待会被截断——**测出来的是"它想让我等多久"，而不是"我愿意等多久"**。
+#    `time.sleep` 在 locust 下是 gevent 打过补丁的协作式让出，不会堵住别的用户。
+MAX_BACKOFF = 30.0
+DEFAULT_BACKOFF = 1.0  # 没给 Retry-After 时的兜底，不要变成 0（那就是不退避）
+
 TEAM_SIZES = [3, 4, 4, 5, 5]  # 8 人局第 1~5 轮任务人数
 EVIL_CHARS = {"assassin", "morgana", "minion"}
 # AI 占位的假用户 ID（库中不存在即被识别为 AI，路由层会随机命名）
@@ -111,6 +136,19 @@ class S2GameUser(HttpUser):
             "X-Request-ID": f"bench-s2-{uuid.uuid4().hex[:12]}",
         }
 
+    def _backoff(self, resp) -> None:
+        """被拒了就照服务端说的等，等待有上界。见 MAX_BACKOFF 上方的说明。
+
+        **服务端已经把答案写在响应里了**，客户端自己拍一个间隔纯属多余——
+        `Retry-After` 是按"还差多少令牌 / 最老那次请求何时滑出窗口"算出来的，
+        比任何猜测都准。头缺失或不是数字时才退回 DEFAULT_BACKOFF。
+        """
+        try:
+            wait = float(resp.headers.get("Retry-After", DEFAULT_BACKOFF))
+        except (TypeError, ValueError):
+            wait = DEFAULT_BACKOFF
+        time.sleep(min(max(wait, 0.0), MAX_BACKOFF))
+
     @task
     def play(self):
         if self.game_id is None:
@@ -129,6 +167,10 @@ class S2GameUser(HttpUser):
                 resp.success()
             else:
                 resp.failure(f"创建对局失败: {resp.status_code} {resp.text[:200]}")
+                # 建局失败时 game_id 保持 None 是对的（压根没有局），但**不能立刻再试**：
+                # 那正是 run B 里 28,729 次建局尝试的另一半原因。
+                if resp.status_code in (429, 503):
+                    self._backoff(resp)
 
     def _step(self):
         with self.client.get(
@@ -137,7 +179,15 @@ class S2GameUser(HttpUser):
         ) as resp:
             if resp.status_code != 200:
                 resp.failure(f"快照获取失败: {resp.status_code}")
-                self.game_id = None
+                # 只有 404 才是"这局真没了"。429/5xx 都只是**这次没成功**，
+                # 局还在——清掉 game_id 就会去建新局，把限流放大成流量（见文件中部说明）。
+                if resp.status_code == 404:
+                    self.game_id = None
+                elif resp.status_code in (429, 503):
+                    # 503 和 429 是同一类信号（"稍后再来"），Redis 池那个 handler
+                    # 也带 Retry-After。**刻意不给 500 退避**：那是"我们坏了"，
+                    # 不是"现在别来"——它该在曲线上又快又响地暴露出来。
+                    self._backoff(resp)
                 return
             state = resp.json()["data"]
 
@@ -147,11 +197,16 @@ class S2GameUser(HttpUser):
 
         action = self._decide(state)
         if action:
-            self.client.post(
+            with self.client.post(
                 f"/api/v1/games/{self.game_id}/action",
                 json=action, headers=self._headers(),
                 name=f"POST /action ({action['action_type']})",
-            )
+                catch_response=True,
+            ) as resp:
+                # 动作被拒同样只是这次没成功：该我行动这件事没变，退避后下个 tick
+                # 会从快照里重新读到轮次还在我身上，然后再交一次。
+                if resp.status_code == 429:
+                    self._backoff(resp)
 
     def _decide(self, state: dict) -> dict | None:
         """根据快照判断"现在是否轮到我行动"，返回动作或 None"""
