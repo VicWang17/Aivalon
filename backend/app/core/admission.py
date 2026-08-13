@@ -42,6 +42,7 @@ Lua 脚本在 Redis 里单线程整段执行，这个序列才是原子的。
 开关表达的是"人做的决定不能自己失效"，限流器表达的是"别帮着把故障放大"。
 **每个有兜底的地方都要单独想一遍失败方向，照抄隔壁就会写反。**
 """
+import hmac
 import logging
 from typing import Optional, Tuple
 
@@ -61,6 +62,39 @@ IP_KEY_PREFIX = "admit:ip:"
 # 负载均衡会认为节点已死并把它摘掉——于是剩下的节点承接更多流量、更快被拒，
 # 限流器亲手把一次过载放大成雪崩。/metrics 同理，正过载时最需要看指标。
 EXEMPT_PATHS = frozenset({"/health", "/metrics", "/", "/cluster"})
+
+# 内部请求的豁免凭据。**这条豁免是 S4 run B 撞出来的**（DEVLOG 044）：
+# AI worker 跑完一个回合后要回调 `/games/{id}/ai_action` 把动作提交回 Web 进程，
+# 而那条路径过准入、和用户流量抢同一个桶。压测里它被拒了 54 次，后果是
+# **回调被拒 → AI 任务退避重试 → 房间推进不了 → 玩家以为这局没了去建新局**——
+# 过载自己长出了一条正反馈。
+#
+# **判据和 /health 豁免是同一条**：拒掉健康检查会让 LB 摘节点、剩下的更快被拒；
+# 拒掉 AI 回调会让房间卡住、玩家重新建局。形状一模一样。
+# **凡是"系统为了自愈而发给自己的请求"，都不该和外部流量抢配额**——
+# 它被拒的代价不是少服务一个人，而是**已经服务到一半的那些人全部卡住**。
+# 顺带也覆盖了 `/internal/*`：**过载正是最需要拧降级开关的时刻**，
+# 那时候把操作入口也拒了，等于事故中把方向盘锁死。
+#
+# **为什么按凭据豁免而不是往 EXEMPT_PATHS 里加路径**：回调路径带 `{game_id}`，
+# 而那是个精确匹配的集合，加不进去；按前缀匹配则等于开一个人人可走的后门。
+#
+# **豁免必须验密钥，不能只看头在不在**——否则加一个头就能绕过整层准入，
+# 那就是 `X-Forwarded-For` 那个错误再犯一次：**一个可伪造的凭据等于没有凭据**。
+INTERNAL_SECRET_HEADER = "X-Internal-Secret"
+
+
+def is_internal_request(request: Request) -> bool:
+    """带着**验过的**内部密钥的请求，豁免准入。
+
+    用 `compare_digest` 而不是 `==`：这个比较发生在**每个请求**上，
+    朴素比较会在第一个不同的字节上短路返回，逐字节试探就能把密钥问出来。
+    （路由里那几处 `!=` 也一样该改，但那是另一件事，不混在这次改动里。）
+    """
+    secret = request.headers.get(INTERNAL_SECRET_HEADER)
+    if not secret:
+        return False
+    return hmac.compare_digest(secret, settings.SECRET_KEY)
 
 # 桶：HASH{t=剩余令牌, ts=上次补令牌的时刻}
 # 返回 {判定, 建议重试毫秒}；判定 0=放行 1=全局桶空 2=IP 桶空
@@ -156,6 +190,12 @@ class AdmissionMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         if not settings.RATE_LIMIT_ADMISSION_ENABLED or request.url.path in EXEMPT_PATHS:
+            return await call_next(request)
+
+        # 内部回调豁免（见 INTERNAL_SECRET_HEADER 上方的说明）：
+        # AI worker 回调提交动作、以及事故中拧降级开关，都不该和外部流量抢桶。
+        # 放在转发豁免之前是因为它更基础：**这不是"少算一次"，而是"根本不该被算"**。
+        if is_internal_request(request):
             return await call_next(request)
 
         # 跨节点转发豁免：转发后的请求会在第二个节点再过一次准入，同一个用户动作

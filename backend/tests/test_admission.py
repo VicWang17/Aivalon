@@ -13,12 +13,14 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio
+import inspect
 
 import pytest
 import pytest_asyncio
 import redis.asyncio as aioredis
 
 from app.core import admission
+from app.core.config import settings
 
 
 def _redis_ok() -> bool:
@@ -244,6 +246,78 @@ async def test_health_check_is_exempt():
     """
     assert "/health" in admission.EXEMPT_PATHS
     assert "/metrics" in admission.EXEMPT_PATHS
+
+
+def _req(headers: dict):
+    """最小请求替身：`is_internal_request` 只读 headers。
+
+    刻意不用 `TestClient`——那会跑真实 lifespan、要碰 Redis，而模块级连接池在
+    全量跑时已绑到别的事件循环上（同 test_redis_pool.py 那条）。
+    """
+    class Req:
+        pass
+
+    r = Req()
+    r.headers = headers
+    return r
+
+
+def test_internal_callback_is_exempt_from_admission():
+    """带**验过的**内部密钥的请求豁免准入。
+
+    这条是 S4 run B 撞出来的（DEVLOG 044）：AI worker 跑完一个回合要回调
+    `/games/{id}/ai_action` 把动作交回 Web 进程，而那条路径过准入、和用户流量
+    抢同一个桶。压测里被拒 54 次，后果是**回调被拒 → AI 任务退避重试 →
+    房间推进不了 → 玩家以为这局没了去建新局**——过载自己长出一条正反馈。
+
+    **判据和 /health 豁免是同一条**：拒健康检查会让 LB 摘节点、剩下的更快被拒；
+    拒 AI 回调会让房间卡住、玩家重建局。**凡是"系统为了自愈而发给自己的请求"
+    都不该和外部流量抢配额**——它被拒的代价不是少服务一个人，
+    而是**已经服务到一半的那些人全部卡住**。
+    """
+    assert admission.is_internal_request(
+        _req({admission.INTERNAL_SECRET_HEADER: settings.SECRET_KEY})
+    )
+
+
+def test_exemption_requires_the_right_secret_not_just_the_header():
+    """光有头不算，密钥必须对。
+
+    只看头在不在的话，加一个请求头就能绕过**整层**准入——那是
+    `X-Forwarded-For` 那个错误再犯一次：**一个可伪造的凭据等于没有凭据**。
+    这条压舱：它一红就说明准入层被开了个人人可走的后门。
+    """
+    assert not admission.is_internal_request(
+        _req({admission.INTERNAL_SECRET_HEADER: "wrong-secret"})
+    )
+    assert not admission.is_internal_request(_req({}))
+    assert not admission.is_internal_request(
+        _req({admission.INTERNAL_SECRET_HEADER: ""})
+    )
+
+
+def test_secret_comparison_is_constant_time():
+    """密钥比较必须用 `compare_digest`，不能用 `==`。
+
+    这个比较发生在**每一个请求**上。朴素比较在第一个不同的字节上就短路返回，
+    逐字节试探能把耗时差异变成一次密钥泄露——**能被计时的比较就是能被问出来的秘密**。
+    源码断言，因为行为上测不出时序差异。
+    """
+    src = inspect.getsource(admission.is_internal_request)
+    assert "compare_digest" in src, "内部密钥比较要用 hmac.compare_digest"
+
+
+def test_internal_exemption_is_by_credential_not_by_path_prefix():
+    """豁免必须按凭据判，不能按路径前缀。
+
+    回调路径带 `{game_id}`，`EXEMPT_PATHS` 是精确匹配的集合、加不进去；
+    改成前缀匹配 `/api/v1/games` 则等于**把整个对局接口从准入里摘出去**，
+    那正是最需要保护的地方。所以豁免的判据只能是"证明得了自己是内部请求"。
+    """
+    for p in admission.EXEMPT_PATHS:
+        assert "ai_action" not in p and "ai_thinking" not in p, (
+            "内部回调不该靠路径豁免，见 is_internal_request"
+        )
 
 
 def test_client_ip_ignores_forwarded_header():
