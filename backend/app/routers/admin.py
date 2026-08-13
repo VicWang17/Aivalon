@@ -7,7 +7,7 @@
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from app.core import degrade, switches
+from app.core import breaker, degrade, switches
 from app.core.config import settings
 from app.core.redis import redis_client
 
@@ -95,3 +95,28 @@ async def reset_degrade_level(x_internal_secret: str = Header(None)):
     _guard(x_internal_secret)
     await degrade.reset(redis_client)
     return await degrade.snapshot(redis_client)
+
+
+# ---- 依赖熔断（见 core/breaker.py）----
+
+
+@router.get("/breakers", include_in_schema=False)
+async def list_breakers(x_internal_secret: str = Header(None)):
+    """各依赖熔断器的状态、窗口内样本、以及还要冷却多久。
+
+    **这个接口是为了回答"现在到底是谁在降级"**：`degrade_level_effective` 高于
+    `degrade_level` 时，档位是熔断器压上去的，得知道是哪个依赖挂了。
+    `cooldown_left` 尤其要看——它是"再过多久会自动探测一次恢复"，
+    没有这个数就只能干等着猜。
+
+    **刻意只读不写，没有"手动跳闸"的入口**：想关掉 LLM 有 H-1 的开关，
+    想整体降级有降级矩阵，再加一个"手动跳闸"就是第三个能达到同样效果的入口——
+    **同一个效果有三个入口，事故里就没人知道该撤销哪一个**（同 H-3c·下：
+    生命周期不同的东西不能共用状态位，反过来同一件事也不该有多个开关）。
+    """
+    _guard(x_internal_secret)
+    return {
+        "breakers": breaker.snapshot(),
+        # 熔断器**推断**的档位，和人手拧的那个分开返回，别让人以为有谁动过旋钮
+        "implied_level": breaker.implied_level(),
+    }

@@ -118,6 +118,19 @@ class Settings(BaseSettings):
     DEGRADE_CREATE_GAME_TIMES: int = 20
     DEGRADE_CREATE_GAME_SECONDS: float = 10.0
 
+    # 依赖熔断（见 app/core/breaker.py）。**舱壁管单次上界，熔断管"总共白等多久"**：
+    # LLM 挂掉时舱壁让每个 AI 回合照旧付满 45 秒才回落，熔断学到之后一次都不等。
+    # 窗口 30s、至少 8 个样本、失败过半就跳闸。
+    # **`MIN_SAMPLES` 是比例判定的前提**：1 次里失败 1 次是 100%，
+    # 少了它第一次网络抖动就能把 LLM 整个摘掉（同 C07 分位数的样本量前提）。
+    BREAKER_LLM_WINDOW: float = 30.0
+    BREAKER_LLM_MIN_SAMPLES: int = 8
+    BREAKER_LLM_FAILURE_RATIO: float = 0.5
+    # 冷却期：这段时间内一次都不调，然后放**一个**探针进去试。
+    # 取值比 LLM 超时上界（45s）更长，是为了让"依赖真的缓过来了"有时间发生——
+    # 冷却比一次调用还短的话，等于刚跳闸就又去打那个正在过载的依赖。
+    BREAKER_LLM_OPEN_FOR: float = 60.0
+
     # 集群（房间路由，见 app/core/node_registry.py）
     # 显式指定节点身份：重启后身份不变，名下房间会漂回来；留空则按 主机名-进程号-随机后缀 自动生成
     NODE_ID: str = ""

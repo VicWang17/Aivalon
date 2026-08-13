@@ -124,13 +124,39 @@ async def level(redis=None) -> int:
     return _observe(value)
 
 
+async def effective_level(redis=None) -> int:
+    """**实际生效的档位** = max(人手拧的, 熔断器推断的)。
+
+    为什么熔断器不直接去写 `degrade:level`
+    --------------------------------
+    跳闸后 `set_level(2)` 只有一行，很诱人，但它是错的：那个 key 是**人的决定**，
+    刻意不设 TTL、只能由人撤销（见文件头）。熔断器往里写就出现两个后果——
+      1. **机器覆盖人的决定**：人本来拧在 3 档，熔断器写个 2 就把 L3 撤销了；
+      2. **撤不回去**：依赖恢复后谁来把它写回 0？写回去又可能抹掉人半夜拧的那一档，
+         而"到底是谁拧的"这个信息在一个整数里根本存不下。
+    所以两个来源**各自保存、读的时候取最大值**。这和 H-3c·下 那条是同一句话：
+    **生命周期不同的东西不能共用一个状态位**——自动触发的必须能自动恢复，
+    人手触发的必须留到人来撤销。
+
+    取 max 是安全的合并方式：两个来源的意图都是"这一刀砍下去"，
+    **谁都不该被别人的"不用降"覆盖掉**（同 AI 侧四条通路取"或"）。
+    """
+    manual = await level(redis)
+    # 纯本地内存判断，不含 await，不会给热路径添往返
+    from app.core import breaker
+    value = max(manual, breaker.implied_level())
+    metrics.degrade_level_effective.set(value)
+    return value
+
+
 async def at_least(target: int, redis=None) -> bool:
-    """当前档位是否已经到了 `target`。
+    """这一级的措施现在是否生效。
 
     功能侧一律用这个，**不要自己拿 `level()` 去比 `==`**：
     比 `==` 的话往更严重的档位拧反而会把这个功能放开（见文件头）。
+    走 `effective_level` 而不是 `level`，所以熔断器推断出来的降级也算生效。
     """
-    return await level(redis) >= target
+    return await effective_level(redis) >= target
 
 
 async def set_level(value: int, redis=None) -> int:

@@ -26,6 +26,14 @@
 返回 `{"error": ...}`，调用方（`ai_service`）据此回落规则引擎——AI 说句套话，
 对局照常推进。**超时不能上抛成任务失败**：抛出去会走 Celery 重试，
 而重试还是打同一个慢掉的 LLM，等于把一次慢放大成五次慢。
+
+上面这些都是"单次"的事，熔断管的是"总共"
+--------------------------------
+舱壁保证每次最多等 45 秒，但 LLM 真挂了的时候，**每个** AI 回合都要付满这 45 秒
+才回落——对局能推进，但每步慢 45 秒，玩家看着和卡死没区别。所以再包一层熔断器
+（`core/breaker.py`）：窗口内失败过半就直接短路，后面的调用一次都不等。
+**熔断挂在这里而不是挂在 `ai_service` 里**：挂在调用方的话，下一个调 LLM 的人
+不会知道要先问一句，这道防线就只护住了一条路径。
 """
 import asyncio
 import json
@@ -35,10 +43,23 @@ from typing import Optional, Dict, Any, List
 
 from openai import AsyncOpenAI
 
-from app.core import metrics
+from app.core import breaker, metrics
 from app.core.config import settings
 
 logger = logging.getLogger("aivalon.llm")
+
+# LLM 熔断器。`implies_level=L2`：LLM 整个不可用时，实际效果就是 AI 全部决策
+# 走规则引擎，也就是降级矩阵的 2 档——**把它上报成 L2，事故里那条
+# `degrade_level_effective` 曲线才对得上现实**，而不是"档位显示 0 档但 AI 全在说套话"。
+# 注意它只是"推断该到几档"，不会去写人手拧的那个 key（见 degrade.effective_level）。
+llm_breaker = breaker.register(breaker.Breaker(
+    "llm",
+    window=settings.BREAKER_LLM_WINDOW,
+    min_samples=settings.BREAKER_LLM_MIN_SAMPLES,
+    failure_ratio=settings.BREAKER_LLM_FAILURE_RATIO,
+    open_for=settings.BREAKER_LLM_OPEN_FOR,
+    implies_level=2,
+))
 
 
 class LLMService:
@@ -92,6 +113,17 @@ class LLMService:
         :param timeout: **整次调用**的上界（秒），含建连、传输、解析
         :return: 解析后的字典；失败时是 `{"error": ...}`
         """
+        # 熔断中：**一秒都不等**，直接给调用方一个错误让它回落规则引擎。
+        # 返回的形状和超时那条完全一样，所以调用方一行都不用改——
+        # 对它来说"这次拿不到 LLM"是同一件事，区别只在我们没有为此付时间。
+        if not llm_breaker.allow():
+            metrics.llm_calls_total.labels(result="breaker_open").inc()
+            # **刻意不 observe 耗时**：短路的这次几乎不花时间，记进耗时直方图
+            # 会把 P99 一路拉绿——**依赖挂着的时候延迟曲线反而变好看**，
+            # 和 H-2 那条"失败的耗时也要记"是同一个陷阱的两面：
+            # 真实发生过的等待必须记，压根没发生的调用不能记。
+            return {"error": "llm breaker open"}
+
         started = time.monotonic()
 
         try:
@@ -106,6 +138,8 @@ class LLMService:
             elapsed = time.monotonic() - started
             metrics.llm_calls_total.labels(result="timeout").inc()
             metrics.llm_latency.observe(elapsed)
+            # 超时是熔断最该拦的那种失败：**它白花掉了 45 秒**
+            llm_breaker.record(False)
             logger.warning("LLM 调用超时 %.1fs（上界 %.1fs），回落规则引擎", elapsed, timeout)
             return {"error": f"timeout after {timeout}s"}
         except asyncio.CancelledError:
@@ -117,11 +151,17 @@ class LLMService:
             elapsed = time.monotonic() - started
             metrics.llm_calls_total.labels(result="error").inc()
             metrics.llm_latency.observe(elapsed)
+            # 鉴权、配额、连不上：马上重试也不会成功，算失败
+            llm_breaker.record(False)
             logger.warning("LLM 调用失败（%.1fs）: %s", elapsed, e)
             return {"error": str(e)}
 
         elapsed = time.monotonic() - started
         metrics.llm_latency.observe(elapsed)
+
+        # 这一跳通了，对熔断器来说就是成功——它判的是"这个依赖还能不能用"，
+        # 不是"这次答得对不对"。下面非法 JSON 那条分支刻意也走这个 `True`。
+        llm_breaker.record(True)
 
         if not json_mode:
             metrics.llm_calls_total.labels(result="success").inc()
@@ -131,7 +171,11 @@ class LLMService:
             parsed = json.loads(content)
         except (json.JSONDecodeError, TypeError):
             # 通了但返回的不是合法 JSON：这是"依赖坏了"而不是"依赖慢了"，
-            # 分开记才能在事故里判断该改 prompt 还是该扩容
+            # 分开记才能在事故里判断该改 prompt 还是该扩容。
+            # **但对熔断器来说这次算成功**（上面已经记了）：依赖是活的、答得也快，
+            # 只是答得不对，多半是我们自己的 prompt 问题。算成失败的话，
+            # 一个 prompt bug 会把熔断器跳开，而半开探测同样会拿回非法 JSON——
+            # **它就永远合不回来了**，一个我们自己的 bug 变成了依赖不可用。
             metrics.llm_calls_total.labels(result="invalid").inc()
             logger.warning("LLM 返回的不是合法 JSON，回落规则引擎")
             return {"error": "Invalid JSON response", "raw_content": content}

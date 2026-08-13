@@ -163,6 +163,46 @@ degrade_level = Gauge(
     "Current degradation level (0 = normal, 5 = reject new games)",
 )
 
+# 实际生效的档位 = max(人手拧的, 熔断器推断的)，见 degrade.effective_level。
+# **和上面那条刻意分开两条线，因为看到之后要做的事不同**：
+#   - 只有 degrade_level 高 → 有人拧了闸，该问的是"还没恢复吗"
+#   - effective 高于 degrade_level → **没人拧过，是熔断器在压着**，该去看哪个依赖挂了
+# 合成一条曲线的话，事故复盘时分不清这次降级是人的决定还是机器的推断，
+# 而这两件事的下一步动作完全相反（一个去撤销，一个去修依赖）。
+degrade_level_effective = Gauge(
+    "aivalon_degrade_level_effective",
+    "Effective degradation level (max of manual knob and breaker-implied)",
+)
+
+# ---- 依赖熔断 ----
+# 每个熔断器的状态：0 = closed，1 = half_open，2 = open（见 app/core/breaker.py）。
+# 用一个数值 Gauge 而不是三个布尔，理由同 degrade_level：状态是互斥且有序的。
+breaker_state = Gauge(
+    "aivalon_breaker_state",
+    "Circuit breaker state (0 = closed, 1 = half open, 2 = open)",
+    ["name"],
+)
+
+# 跳闸次数。**这个数才是熔断器的验收口径，不是 state**：state 是瞬时值，
+# Prometheus 抓取间隔里跳闸又恢复就完全看不到；跳闸次数只增不减，抓不丢。
+# 短时间内反复跳闸（这个数在涨但 state 一直是 0）说明依赖半死不活、
+# 或者阈值配得太敏感——**两种都是要调的，而只看 state 会以为一切正常**。
+breaker_trips = Counter(
+    "aivalon_breaker_trips_total",
+    "Circuit breaker trips (closed/half-open -> open)",
+    ["name"],
+)
+
+# 熔断期间被直接挡掉、没有真正发出去的调用数（= 省下的白等时间）。
+# 它和 llm_calls_total{result="timeout"} 是此消彼长的关系：熔断生效后
+# **timeout 那一档应该停止增长，改由这个数增长**——如果两个一起涨，
+# 说明熔断器没挂在真正的调用点上。
+breaker_rejects = Counter(
+    "aivalon_breaker_rejects_total",
+    "Calls short-circuited by an open breaker (never reached the dependency)",
+    ["name"],
+)
+
 # ---- AI 链路 ----
 # 在飞的 AI 任务数（投递时登记、跑完注销，见 app/core/ai_queue.py）。
 # 各进程写的都是从 Redis 读回来的同一个数，所以多进程下不会互相打架。
@@ -190,7 +230,10 @@ ai_turns_degraded = Counter(
 #   timeout —— 依赖**慢了**：该考虑降级或扩容
 #   invalid —— 依赖**坏了**（通了但返回的不是合法 JSON）：该去改 prompt
 #   error   —— 其他失败（鉴权、配额、网络）
+#   breaker_open —— 熔断中，**压根没发出去**（见 app/core/breaker.py）
 # 混成一个 "fallback" 档的话，事故里分不清该扩容还是该改 prompt。
+# 最后那档尤其要和 timeout 分开看：熔断生效后 **timeout 应该停涨、breaker_open 接着涨**，
+# 两个一起涨就说明熔断器没挂在真正的调用点上。
 llm_calls_total = Counter(
     "aivalon_llm_calls_total",
     "LLM invocations by result",
