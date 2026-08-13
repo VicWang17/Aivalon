@@ -1,0 +1,8 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+POST,POST /action (vote),HTTPError('429 Client Error: Too Many Requests for url: POST /action (vote)'),20,2026-08-13T09:30:31Z,2026-08-13T09:32:26Z
+POST,POST /games (创建对局),CatchResponseError('创建对局失败: 0 '),1,2026-08-13T09:31:37Z,2026-08-13T09:31:37Z
+GET,GET /games/{id} (轮询快照),CatchResponseError('快照获取失败: 429'),5734,2026-08-13T09:31:17Z,2026-08-13T09:33:29Z
+POST,POST /action (propose),HTTPError('429 Client Error: Too Many Requests for url: POST /action (propose)'),2,2026-08-13T09:30:31Z,2026-08-13T09:31:57Z
+POST,POST /action (mission),HTTPError('429 Client Error: Too Many Requests for url: POST /action (mission)'),6,2026-08-13T09:30:32Z,2026-08-13T09:32:06Z
+POST,POST /games (创建对局),"CatchResponseError('创建对局失败: 429 {""code"":429,""message"":""请求过于频繁，请稍后再试"",""data"":null}')",1,2026-08-13T09:32:23Z,2026-08-13T09:32:23Z
+POST,POST /action (speak),HTTPError('429 Client Error: Too Many Requests for url: POST /action (speak)'),4,2026-08-13T09:31:34Z,2026-08-13T09:32:00Z
