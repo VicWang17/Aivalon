@@ -23,6 +23,7 @@ from app.core.room_actor import actor_manager, RoomActionTimeout, RoomOverloaded
 from app.core import ai_queue
 from app.core import bloom
 from app.core import cache
+from app.core import degrade
 from app.core import event_journal
 from celery import group
 
