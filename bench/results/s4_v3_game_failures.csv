@@ -1,0 +1,5 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+GET,GET /games/{id} (轮询快照),CatchResponseError('快照获取失败: 429'),3148,2026-08-13T08:09:26Z,2026-08-13T08:11:07Z
+POST,POST /games (创建对局),"CatchResponseError('创建对局失败: 429 {""detail"":""请求过于频繁，请稍后再试""}')",10607,2026-08-13T08:09:34Z,2026-08-13T08:12:01Z
+POST,POST /games (创建对局),"CatchResponseError('创建对局失败: 429 {""code"":429,""message"":""请求过于频繁，请稍后再试"",""data"":null}')",14890,2026-08-13T08:10:11Z,2026-08-13T08:11:07Z
+POST,POST /action (speak),HTTPError('429 Client Error: Too Many Requests for url: POST /action (speak)'),80,2026-08-13T08:10:15Z,2026-08-13T08:11:01Z
