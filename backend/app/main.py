@@ -3,8 +3,12 @@ from contextlib import asynccontextmanager
 import asyncio
 import logging
 import redis.asyncio as redis
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi_limiter import FastAPILimiter
+# `MaxConnectionsError`（池子抽干）是它的子类，池等待超时抛的也是它——
+# 一个 handler 兜住"池满"和"Redis 挂了"，因为调用方该做的动作相同
+from redis.exceptions import ConnectionError as RedisConnectionError
 from prometheus_fastapi_instrumentator import Instrumentator
 from app.core.redis import redis_pool
 from app.core import admission
@@ -97,6 +101,34 @@ app = FastAPI(
 
 # Prometheus 指标：自动采集各路由的 QPS 与延迟分位数，暴露在 /metrics
 Instrumentator().instrument(app).expose(app)
+
+
+@app.exception_handler(RedisConnectionError)
+async def redis_unavailable_handler(request: Request, exc: RedisConnectionError):
+    """拿不到 Redis 连接 / 连不上 Redis → **503 而不是 500**。
+
+    这是 S4 突发复测撞出来的（见 `core/redis.py` 文件头）：池子抽干后
+    redis-py 抛 `MaxConnectionsError`，一路冒到这里变成 **500**，1,377 次。
+    **500 是"我们自己坏了"，而这件事的真相是"现在没有容量、请稍后再来"**——
+    前面三层限流都在如实回答后者，唯独这里在撒谎。
+
+    500 和 503 的区别不只是好看：**500 在曲线上和代码 bug 长得一模一样**，
+    于是"配置没配对"这类问题会被当成"哪里写崩了"去查；而 503 + `Retry-After`
+    是客户端**能据此行动**的答复（同 H-3a：不说等多久，客户端会立刻重试，
+    重试本身变成新峰值）。
+
+    `MaxConnectionsError` 是 `ConnectionError` 的子类，池等待超时抛的也是
+    `ConnectionError`，所以这一个 handler 同时兜住"池子满了"和"Redis 挂了"——
+    **对调用方来说这两件事该做的动作相同，所以刻意不分开**。
+    """
+    metrics.redis_pool_exhausted.inc()
+    logger.warning("Redis 连接不可用，返回 503: %s %s (%s)",
+                   request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"code": 503, "message": "服务繁忙，请稍后再试", "data": None},
+        headers={"Retry-After": "2"},
+    )
 
 # 网关层准入：全局令牌桶 + IP 令牌桶，被拒的请求不碰任何后端资源。
 # 注意这两行的顺序：Starlette 里**后加的中间件在外层**，所以 TraceId 在准入外面。

@@ -1,0 +1,11 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+GET,/api/v1/users/leaderboard,RemoteDisconnected('Remote end closed connection without response'),1,2026-08-13T07:05:42Z,2026-08-13T07:05:42Z
+GET,/api/v1/users/leaderboard,HTTPError('500 Server Error: Internal Server Error for url: /api/v1/users/leaderboard'),21,2026-08-13T07:06:08Z,2026-08-13T07:06:10Z
+GET,/api/v1/games/recent,"ConnectionResetError(54, 'Connection reset by peer')",60,2026-08-13T07:05:25Z,2026-08-13T07:06:18Z
+GET,/api/v1/games/history,RemoteDisconnected('Remote end closed connection without response'),1,2026-08-13T07:05:27Z,2026-08-13T07:05:27Z
+GET,/api/v1/games/history,HTTPError('429 Client Error: Too Many Requests for url: /api/v1/games/history'),18963,2026-08-13T07:04:23Z,2026-08-13T07:07:22Z
+GET,/api/v1/users/leaderboard,HTTPError('429 Client Error: Too Many Requests for url: /api/v1/users/leaderboard'),46224,2026-08-13T07:04:23Z,2026-08-13T07:07:22Z
+GET,/api/v1/users/leaderboard,"ConnectionResetError(54, 'Connection reset by peer')",85,2026-08-13T07:05:25Z,2026-08-13T07:06:18Z
+GET,/api/v1/games/recent,HTTPError('429 Client Error: Too Many Requests for url: /api/v1/games/recent'),32972,2026-08-13T07:04:23Z,2026-08-13T07:07:22Z
+GET,/api/v1/games/recent,HTTPError('500 Server Error: Internal Server Error for url: /api/v1/games/recent'),1355,2026-08-13T07:05:24Z,2026-08-13T07:06:26Z
+GET,/api/v1/games/history,"ConnectionResetError(54, 'Connection reset by peer')",31,2026-08-13T07:05:27Z,2026-08-13T07:06:18Z

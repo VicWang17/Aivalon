@@ -203,6 +203,17 @@ breaker_rejects = Counter(
     ["name"],
 )
 
+# ---- Redis 连接池 ----
+# 因为拿不到 Redis 连接而被兜成 503 的请求数（见 app/core/redis.py 与 main.py 的兜底）。
+# **这个数存在的意义是把一类曾经的 500 变成可解释的信号**：S4 突发复测时池子被抽干，
+# redis-py 抛 `MaxConnectionsError` 一路冒成 500，而 500 在曲线上和代码 bug 长得一样。
+# 它涨说明**池子上限或准入阈值配得不匹配**（池子必须宽于准入允许的突发并发），
+# 不是业务出错——**同一个 5xx，一个要改配置，一个要改代码，混在一起就分不出来**。
+redis_pool_exhausted = Counter(
+    "aivalon_redis_pool_exhausted_total",
+    "Requests answered 503 because no Redis connection was available",
+)
+
 # ---- 邮件 ----
 # 发信结果。四档同 llm_calls_total 的口径：success / timeout / error / breaker_open。
 # **这个指标补的是一个"用户知道坏了、我们不知道"的洞**：原来发信失败只会在

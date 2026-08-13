@@ -23,6 +23,20 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_PASSWORD: Optional[str] = None
+    # 连接池上限（见 app/core/redis.py）。**原来这里什么都不写，于是取了 redis-py 的
+    # 默认值 100**——没人选过这个数，而 S4 突发复测正是撞在它上面：池子抽干后
+    # redis-py 直接抛 `MaxConnectionsError`，用户拿到 **500**。
+    # **这个数必须 >= 准入层允许的突发并发**（`RATE_LIMIT_GLOBAL_CAPACITY`=400），
+    # 否则就是"门口保安放 400 人进场、场内只有 100 把椅子"——
+    # **保护层的上限宽于它保护的最窄资源，等于这层保护在这个维度上没生效**。
+    REDIS_MAX_CONNECTIONS: int = 400
+    # 池满时等多久（秒）。**刻意是"等一下"而不是"立刻报错"**：连接的持有时间是
+    # 一次命令往返（亚毫秒级），队伍必然很快前进，短暂排队换来的是把一次 500
+    # 变成几毫秒延迟。这和 H-3c·上"房间队列刻意不 await put"**恰好相反**，
+    # 判据是**持有时间**：房间动作要跑十几秒，等它等于无上界地等；
+    # 连接借出即还，等待有天然上界。
+    # 但等待必须有超时——**没有上界的等待就是把排队藏到看不见的地方**（同 H-3c·上）。
+    REDIS_POOL_TIMEOUT: float = 3.0
     
     # Email
     MAIL_USERNAME: str
