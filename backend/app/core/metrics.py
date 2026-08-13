@@ -247,6 +247,19 @@ ai_turns_degraded = Counter(
     ["reason"],
 )
 
+# AI 任务投递的去重结果（见 `ai_queue.claim`）。
+# **`ai_queue_depth` 看不出这件事**：它回答"积压多少"，回答不了"投进去的有多少是白投的"。
+# 投递侧那个 O(n²) 重复（DEVLOG 048）能存在那么久，恰恰是因为没有任何指标看得见它——
+# 对局照样打完，只是投了三倍的任务、每次失败还各重试五轮。**不报错的 bug 活得最久**。
+# 两档的意义：`deduped / (dispatched + deduped)` 就是白投比例。
+# 它**不该长期为 0**——0 说明幂等键压根没生效（或者没被调用），
+# 而不是说明没有重复；也不该接近 1，那说明触发时机本身该动了。
+ai_dispatch_total = Counter(
+    "aivalon_ai_dispatch_total",
+    "AI turn dispatches, split by whether the idempotency claim was won",
+    ["result"],
+)
+
 # LLM 调用结果。四档刻意分开，因为它们要采取的行动不同：
 #   success —— 正常
 #   timeout —— 依赖**慢了**：该考虑降级或扩容

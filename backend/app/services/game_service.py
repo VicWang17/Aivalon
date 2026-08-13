@@ -229,12 +229,32 @@ class GameService:
                 should_act = True
                 
             if should_act:
+                # 幂等键**只加在 VOTE / MISSION 上**，和下面那个 break 是同一条判据的两半：
+                # 不 break 的阶段才会重复投递（这个函数挂在每一次 process_action 之后，
+                # 每次都把"还没行动的"重扫一遍 → 7+6+…+1，见 ai_queue.claim 上方的说明）。
+                # 另外三个阶段一次只投一个、投完阶段就翻页，压根不是放大源。
+                #
+                # **SPEECH 尤其不能加**：AI 可以 `is_end=False` 连续发言，
+                # `speaker_id` 不变还要再行动一次——加了键就是它永远等不到下一次投递，
+                # 房间永久卡死。**浪费可恢复，卡死不可恢复**，所以这里刻意只覆盖
+                # "一人一次"这条不变量真正成立的两个阶段，而不是图整齐全加上。
+                claim = ""
+                if game.phase in (GamePhase.VOTE, GamePhase.MISSION):
+                    claim = ai_queue.claim_key(
+                        game_id, game.round, game.vote_track,
+                        game.phase.value, player.user_id,
+                    )
+                    if not await ai_queue.claim(claim, redis_client):
+                        # 这个阶段已经给它投过了。**continue 不是 break**：
+                        # 后面的 AI 可能还没投过，break 会把它们一起漏掉。
+                        continue
+
                 # 投递任务到 Celery。登记一笔"在飞任务"，token 随任务带下去供注销用——
                 # **深度必须在投递侧记账**：等 worker 领到任务才记的话，积压期间
                 # 队列里躺着的任务一个都不算，深度永远看着很小，而那正是要看的东西。
                 token, _ = await ai_queue.enter(redis_client)
                 print(f"[GameService] Scheduling AI task for {player.username} ({player.user_id})")
-                ai_tasks.append(process_ai_turn.s(game_id, player.user_id, token))
+                ai_tasks.append(process_ai_turn.s(game_id, player.user_id, token, claim))
 
                 # 如果是投票或任务阶段，所有 AI 可以并行行动
                 # 如果是发言或提名，通常是串行的

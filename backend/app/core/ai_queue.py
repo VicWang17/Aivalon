@@ -123,6 +123,95 @@ async def depth(redis=None) -> int:
     return await _run("", redis)
 
 
+# ---------------------------------------------------------------------------
+# 投递幂等：把"一个 AI 在一个阶段只行动一次"这条不变量直接写出来
+#
+# 原来的代码是**靠扫描近似**这条不变量的：`_trigger_ai_logic` 遍历所有玩家，
+# 挑出"还没投票 / 还没执行任务"的那些投任务。这个近似在重入下必然失真——
+# 那个函数挂在**每一次** `process_action` 之后（`game_service.py:721`），
+# 而它对 VOTE / MISSION 刻意不 `break`（那两个阶段所有 AI 可以并行）。
+# 于是：7 个 AI 要投票 → 投 7 个任务 → AI#1 投完票又触发一次 → 还有 6 个没投
+# → 再投 6 个 → …… **7+6+…+1 = 28 次投递换 7 次有效投票**。
+# 大白话：老师问"还有谁没交作业"，每收到一份就重新问一遍全班——
+# 收到第一份时喊 7 个名字，第二份时喊 6 个。喊的次数是人数的平方，作业还是那几份。
+#
+# **`break` 那行和调用时机各自都是对的，错在两者的组合**，所以这里不去动它们中的
+# 任何一个，而是把不变量本身登记下来：**修补每一处近似它的地方，不如把它直接写出来**。
+#
+# 键里为什么有 vote_track
+# --------------------
+# 同一个 `round` 里投票可以重来 5 次（提名被否 → `vote_track += 1` → 回 SPEECH →
+# 重新提名 → 再投一轮，见 `game_service.py:462-476`）。只按 `{round}:{phase}` 建键的话，
+# 第二次提名的那轮投票会被当成"这个 AI 已经投过了"——**AI 永远不投票，房间永久卡死**。
+# 那比 O(n²) 严重得多：浪费可恢复，卡死不可恢复。
+#
+# 失败方向：**读不到 Redis 就照旧投递**
+# ------------------------------
+# 和 `_fallback_depth` 同一条理由，但后果更硬：这一层拦掉的是**任务本身**。
+# 少投一个 AI 回合没有任何人会再来提交它（AI 回合背后没有会重试的客户端），
+# 房间不是变慢而是永久卡死；多投一个只是浪费一次 HTTP。
+# **哪边的代价可恢复，就往哪边倒。**
+CLAIM_PREFIX = "aiq:dispatched"
+
+
+def claim_key(game_id: str, round_no: int, vote_track: int,
+              phase: str, player_id: int) -> str:
+    return f"{CLAIM_PREFIX}:{game_id}:r{round_no}:t{vote_track}:{phase}:{player_id}"
+
+
+async def claim(key: str, redis=None) -> bool:
+    """登记一次投递，返回"这次该不该投"。
+
+    `SET NX` 一条命令完成"查 + 占"，**刻意不拆成 EXISTS + SET**：
+    两个 API 进程同时给同一个 AI 投递时，拆开就是两个都读到"没登记过"
+    （同 admission / sliding_window / ai_queue 的深度记账，都是同一个理由）。
+    """
+    if redis is None:
+        return True
+    try:
+        ok = await redis.set(key, "1", nx=True, ex=int(settings.AI_DISPATCH_CLAIM_TTL))
+    except Exception as e:
+        logger.warning("投递幂等键读写失败，按照旧投递处理 key=%s: %s", key, e)
+        return True
+    won = bool(ok)
+    metrics.ai_dispatch_total.labels(result="dispatched" if won else "deduped").inc()
+    return won
+
+
+async def release_claim(key: str, redis=None) -> None:
+    """撤销登记，让这个 AI 回合可以被重新投递。
+
+    **必须有这个出口**：幂等键顺手拿掉了原来那个 O(n²) 重扫的副作用——
+    它虽然浪费，却也在无意中充当"投递丢了就再投一次"的兜底。登记之后如果这个回合
+    最终没跑成（永久错误、重试用尽），键还占着就没人会再投它，**房间卡死**。
+    所以任务确定放弃时要把键放掉，等下一次 `_trigger_ai_logic` 重投。
+
+    放掉之后不会退回 O(n²)：投递侧有**两道独立的闸**——扫描条件（它还没行动）
+    和幂等键（这个阶段还没投过它）。真的已经投过票的 AI，`has_voted` 那道就把它挡住了。
+    """
+    if not key or redis is None:
+        return
+    try:
+        await redis.delete(key)
+    except Exception as e:
+        logger.warning("撤销投递幂等键失败 key=%s: %s", key, e)
+
+
+def release_claim_sync(key: str) -> None:
+    """同步版撤销，供 Celery 任务收尾用（同 `leave_sync`：那时 AI 逻辑的 loop 已关）。"""
+    if not key:
+        return
+    try:
+        from app.core.redis import redis_sync, redis_sync_pool
+        client = redis_sync.Redis(connection_pool=redis_sync_pool)
+        try:
+            client.delete(key)
+        finally:
+            client.close()
+    except Exception as e:
+        logger.warning("撤销投递幂等键失败 key=%s: %s", key, e)
+
+
 async def leave(token: str, redis=None) -> None:
     """任务跑完注销。失败只记日志——**注销失败不能让任务本身失败**，
     否则一次 Redis 抖动会把已经算完的 AI 回合变成一次 Celery 重试。
