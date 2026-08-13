@@ -203,6 +203,17 @@ breaker_rejects = Counter(
     ["name"],
 )
 
+# ---- 邮件 ----
+# 发信结果。四档同 llm_calls_total 的口径：success / timeout / error / breaker_open。
+# **这个指标补的是一个"用户知道坏了、我们不知道"的洞**：原来发信失败只会在
+# BackgroundTask 里抛个没人看的异常，用户拿到"验证码已发送"然后永远收不到信，
+# 而我们这边一个计数器都不涨——**最坏的一种故障就是只有用户看得见的故障**。
+email_sends = Counter(
+    "aivalon_email_sends_total",
+    "Verification email sends by result",
+    ["result"],
+)
+
 # ---- AI 链路 ----
 # 在飞的 AI 任务数（投递时登记、跑完注销，见 app/core/ai_queue.py）。
 # 各进程写的都是从 Redis 读回来的同一个数，所以多进程下不会互相打架。

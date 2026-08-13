@@ -9,7 +9,8 @@ from app.schemas.token import Token
 from app.core.security import get_password_hash, verify_password, create_access_token
 from app.schemas.base import ResponseModel
 from app.core.redis import get_redis
-from app.core.email import send_verification_email, generate_verification_code
+from app.core.email import (send_verification_email, generate_verification_code,
+                            is_available as email_is_available)
 from app.core.deps import get_current_user
 from app.core.rate_limit import login_rate_limit, register_rate_limit, send_code_rate_limit
 from redis.asyncio import Redis
@@ -30,26 +31,41 @@ async def send_code(
     发送邮箱验证码
     """
     email = email_data.email
-    
+
     # 1. 检查是否频繁发送 (60秒内)
     if await redis.get(f"email_limit:{email}"):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="发送太频繁，请稍后再试"
         )
-    
-    # 2. 生成验证码
+
+    # 2. 邮件熔断中就**别承诺**（见 core/email.py）。
+    # 这一句必须在下面那两个 `set` 之前：发码接口先写验证码 + 60s 发送间隔，
+    # 再把发信丢进后台。邮件挂着的时候，用户**既收不到信、又被那个 60s 锁在外面**,
+    # 而他收到的响应是"验证码已发送"——**在依赖已知不可用时承诺出去，
+    # 换来的是用户以为自己收得到、然后重试还被拒**。
+    # 真正的闸在 `send_verification_email` 里（挂在依赖边界上）；这里挡的是"承诺"。
+    if not email_is_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="邮件服务暂时不可用，请稍后再试",
+            # 不说等多久客户端就立刻重试，重试本身变成新峰值（同 H-3a）
+            headers={"Retry-After": "120"},
+        )
+
+    # 3. 生成验证码
     code = generate_verification_code()
-    
-    # 3. 存入 Redis (有效期 5 分钟)
+
+    # 4. 存入 Redis (有效期 5 分钟)
     await redis.set(f"verification_code:{email}", code, ex=300)
-    
-    # 4. 限制发送频率 (60秒)
+
+    # 5. 限制发送频率 (60秒)
     await redis.set(f"email_limit:{email}", "1", ex=60)
-    
-    # 5. 异步发送邮件
+
+    # 6. 异步发送邮件。**它永不抛异常**（见 core/email.py）——抛到 BackgroundTask
+    # 里没有任何人能处理，只会变成一行没人看的日志
     background_tasks.add_task(send_verification_email, email, code)
-    
+
     return ResponseModel(
         code=0,
         message="验证码已发送",

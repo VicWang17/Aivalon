@@ -1,3 +1,27 @@
+# 这个文件是对局结束后的统计任务（Celery，`stats_queue`）。
+#
+# 这里刻意**不加熔断器**
+# ------------------
+# H-5 给 LLM 和邮件都加了熔断，这个依赖（MySQL + Redis）刻意不加。理由不是"来不及做"，
+# 是**熔断在这里解决不了问题、还会制造新问题**：
+#   1. **熔断的前提是有个可接受的兜底。** LLM 有规则引擎、邮件有"稍后再试"，
+#      而统计**没有兜底**——胜场数据不算就是永久丢账，没有"次优答案"可退。
+#      **没有兜底的依赖，短路它等于直接丢数据。**
+#   2. **没有人在等，所以"不白等"这个收益不存在。** 这是 Celery 任务，慢十分钟
+#      不影响任何人的请求；LLM 那边熔断买到的是玩家的等待时间，这里没有这笔账。
+#   3. **它已经有正确的机制了：重试 + 幂等。** MySQL 挂了正确的做法是**等它回来再写**，
+#      而不是"跳过这一批"。熔断和重试的适用条件恰好相反——
+#      **熔断适合"失败了就放弃这一次"，重试适合"这一次不能丢"**。
+#      判据不是依赖有多重要，是**丢掉这次调用可不可接受**。
+#
+# 换成指数退避的理由
+# --------------
+# 原来是 `countdown=5` 固定值：MySQL 挂 30 秒的话，3 次重试全落在故障窗口里、
+# 全部失败，然后任务进死信——**重试次数被固定间隔浪费在同一个故障上了**。
+# 退避让这几次重试铺开覆盖更长的窗口，同时**故障期间的重试流量随时间下降**，
+# 不至于在数据库刚要缓过来的时候再压一波（同 H-3a：不说等多久，重试自己会变成新峰值）。
+# 大白话：敲门没人应，不要每 5 秒敲一次敲三次，要 5 秒、20 秒、80 秒地敲。
+import random
 from app.core.celery_app import celery_app
 from app.models.game_enums import Camp, camp_of
 from app.models.user import User
@@ -10,6 +34,19 @@ from typing import List, Optional
 import asyncio
 
 from app.core.idempotency import CeleryIdempotencyManager
+
+
+def retry_countdown(retries: int) -> float:
+    """第 `retries` 次重试等多久：指数退避 + 抖动。
+
+    **抖动不是可选项**：一批对局同时结束（一次故障恢复后常常如此）会被投递成
+    一批任务，它们的重试时刻会完全对齐、成排打在刚恢复的数据库上——
+    **重试自己变成了下一次故障的原因**。同 F-5 缓存 TTL 抖动那条：
+    治的是"整齐"本身，而不是"量大"。
+    """
+    base = settings.STATS_RETRY_BASE * (settings.STATS_RETRY_FACTOR ** retries)
+    base = min(base, settings.STATS_RETRY_MAX)
+    return round(base * random.uniform(0.8, 1.2), 1)
 
 @celery_app.task(bind=True, queue="stats_queue", max_retries=3)
 def process_game_result(self, game_id: str, winner: str, players_data: List[dict]):
@@ -111,8 +148,8 @@ def process_game_result(self, game_id: str, winner: str, players_data: List[dict
         except Exception as e:
             print(f"[Stats Task] Error processing game {game_id}: {e}")
             db.rollback()
-            # 抛出异常让 Celery 重试
-            raise self.retry(exc=e, countdown=5)
+            # **这里刻意不加熔断器**，理由见文件头。要的是重试退避。
+            raise self.retry(exc=e, countdown=retry_countdown(self.request.retries))
         finally:
             db.close()
 

@@ -131,6 +131,30 @@ class Settings(BaseSettings):
     # 冷却比一次调用还短的话，等于刚跳闸就又去打那个正在过载的依赖。
     BREAKER_LLM_OPEN_FOR: float = 60.0
 
+    # 邮件（见 app/core/email.py）。**熔断在这里买到的不是时间而是并发槽位**：
+    # 发信跑在 BackgroundTask 里没人等，但邮件服务挂掉时每个发码请求都会占住
+    # 一个协程和一条 SMTP 连接直到超时，而邮箱服务商给的连接配额只有个位数——
+    # **占满之后连正常的信也发不出去了**。同一个模式在不同依赖上省的东西不同。
+    # 原来这里压根没有超时：`fm.send_message` 卡住就是永久卡住（同 H-2）。
+    MAIL_SEND_TIMEOUT: float = 15.0
+    # 样本门槛比 LLM 低：发码是低频接口，**门槛定得比流量还高的熔断器等于没有**。
+    # 但失败比例要求更高——发信失败有时是单个收件地址的问题（对方邮箱满了、
+    # 域名不存在），那不是"依赖挂了"，比例定高才不会被几个坏地址带跳闸。
+    BREAKER_EMAIL_WINDOW: float = 120.0
+    BREAKER_EMAIL_MIN_SAMPLES: int = 3
+    BREAKER_EMAIL_FAILURE_RATIO: float = 0.8
+    BREAKER_EMAIL_OPEN_FOR: float = 120.0
+
+    # 统计任务的重试退避（见 app/tasks/stats.py）。
+    # **这个依赖刻意不加熔断**：熔断的前提是有个可接受的兜底，而统计没有——
+    # 胜场数据不算就是永久丢账，短路它等于直接丢数据。它要的是"等依赖回来再写"。
+    # 原来是固定 `countdown=5`：MySQL 挂 30 秒的话 3 次重试全落在故障窗口里、
+    # 全部失败然后进死信——**重试次数被固定间隔浪费在同一个故障上了**。
+    # 5s → 20s → 80s，覆盖到 100 秒开外，且故障期间的重试流量随时间下降。
+    STATS_RETRY_BASE: float = 5.0
+    STATS_RETRY_FACTOR: float = 4.0
+    STATS_RETRY_MAX: float = 300.0
+
     # 集群（房间路由，见 app/core/node_registry.py）
     # 显式指定节点身份：重启后身份不变，名下房间会漂回来；留空则按 主机名-进程号-随机后缀 自动生成
     NODE_ID: str = ""
